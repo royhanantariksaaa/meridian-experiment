@@ -67,6 +67,24 @@ function selectNonDuplicateCandidate(observations, state, options) {
   return selectPaperCandidate(filtered, options);
 }
 
+async function refreshOpenPositions({ timeframe, autoExit, exitRules, label = "monitor" }) {
+  const stateBefore = loadPaperState();
+  if (!stateBefore.open_positions.length) return stateBefore;
+
+  const state = await refreshPaperState({ timeframe, autoClose: autoExit, exitRules });
+  const autoClosedCount = state.last_auto_closed?.length || 0;
+  console.log(`[${label}] refreshed ${stateBefore.open_positions.length} open paper position(s)${autoClosedCount ? `, auto-closed ${autoClosedCount}` : ""}`);
+  for (const position of state.open_positions) {
+    const check = position.last_check;
+    if (!check) continue;
+    console.log(`[${label}] ${position.pool_name}: held=${check.held_minutes}m vol/activeTVL=${check.volume_active_tvl_ratio}x fee/TVL=${check.fee_active_tvl_ratio}% price=${check.price_change_from_entry_pct}% signals=${check.exit_signals?.length || 0}`);
+  }
+  if (autoClosedCount) {
+    printStateCompact(state, { showAutoClosed: true });
+  }
+  return state;
+}
+
 async function paperCycle({
   balance,
   entry,
@@ -136,12 +154,26 @@ async function paperCycle({
   printStateCompact(openedState, { showAutoClosed: autoClosedThisCycle });
 }
 
+async function sleepWithMonitoring({ intervalSec, monitorIntervalSec, timeframe, autoExit, exitRules }) {
+  let remaining = intervalSec;
+  while (remaining > 0) {
+    const wait = Math.min(remaining, monitorIntervalSec);
+    console.log(`Sleeping ${wait}s before next ${remaining <= monitorIntervalSec ? "scan" : "position monitor"}. Press Ctrl+C to stop.`);
+    await sleep(wait * 1000);
+    remaining -= wait;
+    if (remaining > 0) {
+      await refreshOpenPositions({ timeframe, autoExit, exitRules, label: "monitor" });
+    }
+  }
+}
+
 async function main() {
   const balance = Number(argValue("balance", "0.1"));
   const entry = Number(argValue("entry", "0.01"));
   const limit = Number(argValue("limit", "10"));
   const maxOpen = Number(argValue("max-open", "3"));
   const intervalSec = Number(argValue("interval", "300"));
+  const monitorIntervalSec = Number(argValue("monitor-interval", "30"));
   const timeframe = argValue("timeframe", "5m");
   const reset = hasFlag("reset");
   const loop = hasFlag("loop");
@@ -151,6 +183,7 @@ async function main() {
 
   console.log("=== Streamlined Paper Agent ===");
   console.log(`balance=${balance} SOL entry=${entry} SOL max_open=${maxOpen} limit=${limit} timeframe=${timeframe} force_best=${forceBest} loop=${loop} auto_exit=${autoExit}`);
+  console.log(`scan_interval=${intervalSec}s monitor_interval=${monitorIntervalSec}s`);
   console.log(`exit_rules=${JSON.stringify(exitRules)}\n`);
 
   if (!loop) {
@@ -173,8 +206,7 @@ async function main() {
       exitRules,
     });
     first = false;
-    console.log(`Sleeping ${intervalSec}s. Press Ctrl+C to stop.`);
-    await sleep(intervalSec * 1000);
+    await sleepWithMonitoring({ intervalSec, monitorIntervalSec, timeframe, autoExit, exitRules });
   }
 }
 
