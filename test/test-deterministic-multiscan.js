@@ -176,7 +176,10 @@ async function fetchPools({ pageSize, timeframe, category, relaxed }) {
     `&category=${encodeURIComponent(category)}`;
 
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`Pool Discovery API error ${res.status}: ${res.statusText}`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Pool Discovery API error ${res.status}: ${res.statusText}${body ? ` — ${body.slice(0, 180)}` : ""}`);
+  }
   const data = await res.json();
   const raw = Array.isArray(data.data) ? data.data : [];
   const filtered = [];
@@ -225,6 +228,7 @@ async function main() {
   const limit = Number(argValue("limit", 20));
   const relaxed = hasFlag("relaxed");
   const snapshot = hasFlag("snapshot");
+  const stopOnError = hasFlag("stop-on-error");
   const timeframes = parseList("timeframes", [argValue("timeframe", config.screening.timeframe || "5m")]);
   const categories = parseList("categories", [argValue("category", config.screening.category || "trending")]);
 
@@ -232,18 +236,30 @@ async function main() {
   console.log(`timeframes=${timeframes.join(",")} categories=${categories.join(",")} page_size=${pageSize} relaxed=${relaxed}`);
 
   const scans = [];
+  const errors = [];
   for (const timeframe of timeframes) {
     for (const category of categories) {
-      const scan = await fetchPools({ pageSize, timeframe, category, relaxed });
-      scans.push({ timeframe, category, ...scan });
-      console.log(`- ${timeframe}/${category}: api_total=${scan.total}, raw=${scan.raw_count}, after_filters=${scan.pools.length}`);
+      try {
+        const scan = await fetchPools({ pageSize, timeframe, category, relaxed });
+        scans.push({ timeframe, category, ...scan });
+        console.log(`- ${timeframe}/${category}: api_total=${scan.total}, raw=${scan.raw_count}, after_filters=${scan.pools.length}`);
+      } catch (error) {
+        const message = error?.message || String(error);
+        errors.push({ timeframe, category, error: message });
+        console.log(`- ${timeframe}/${category}: SKIP (${message})`);
+        if (stopOnError) throw error;
+      }
     }
   }
 
   const candidates = uniqueByPool(scans);
   const ranked = rankDeterministicCandidates(candidates).slice(0, limit);
 
-  console.log(`\nUnique candidates after filters: ${candidates.length}`);
+  console.log(`\nSuccessful scans: ${scans.length}/${timeframes.length * categories.length}`);
+  if (errors.length > 0) {
+    console.log(`Skipped scans: ${errors.length}`);
+  }
+  console.log(`Unique candidates after filters: ${candidates.length}`);
   console.log(`Showing top ${ranked.length}\n`);
 
   for (const [index, entry] of ranked.entries()) {
@@ -264,6 +280,7 @@ async function main() {
       categories,
       page_size: pageSize,
       relaxed,
+      errors,
       scan_summary: scans.map(({ timeframe, category, total, raw_count, pools, filtered }) => ({
         timeframe,
         category,
