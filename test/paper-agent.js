@@ -41,10 +41,10 @@ function buildExitRules() {
   };
 }
 
-function printStateCompact(state) {
+function printStateCompact(state, { showAutoClosed = false } = {}) {
   console.log(`Virtual balance: ${formatSol(state.balance_sol)} | open=${state.open_positions.length} | closed=${state.closed_positions.length}`);
 
-  if (state.last_auto_closed?.length) {
+  if (showAutoClosed && state.last_auto_closed?.length) {
     console.log("AUTO-CLOSED THIS CYCLE");
     for (const position of state.last_auto_closed) {
       console.log(`- ${position.id} | ${position.pool_name} | pnl=${position.realized_pnl_pct}% (${position.realized_pnl_sol} SOL) | reason=${position.close_reason}`);
@@ -84,11 +84,13 @@ async function paperCycle({
   }
 
   let state = loadPaperState({ initialBalanceSol: balance });
+  let autoClosedThisCycle = false;
 
   if (state.open_positions.length > 0) {
     console.log("Refreshing open paper positions...");
     state = await refreshPaperState({ timeframe, autoClose: autoExit, exitRules });
     if (state.last_auto_closed?.length) {
+      autoClosedThisCycle = true;
       console.log(`Auto-closed ${state.last_auto_closed.length} paper position(s).`);
     }
   }
@@ -103,20 +105,20 @@ async function paperCycle({
   state = loadPaperState({ initialBalanceSol: balance });
   if (state.open_positions.length >= maxOpen) {
     console.log(`Max paper positions reached (${state.open_positions.length}/${maxOpen}); no new entry.`);
-    printStateCompact(state);
+    printStateCompact(state, { showAutoClosed: autoClosedThisCycle });
     return;
   }
 
   if (state.balance_sol < entry) {
     console.log(`Insufficient virtual SOL for new entry: ${formatSol(state.balance_sol)} < ${formatSol(entry)}.`);
-    printStateCompact(state);
+    printStateCompact(state, { showAutoClosed: autoClosedThisCycle });
     return;
   }
 
   const selected = selectNonDuplicateCandidate(observations, state, { forceBest });
   if (!selected.entry) {
     console.log("No eligible candidate. Nothing opened. Add --force-best to intentionally paper-test the best rejected pool.");
-    printStateCompact(state);
+    printStateCompact(state, { showAutoClosed: autoClosedThisCycle });
     return;
   }
 
@@ -131,7 +133,7 @@ async function paperCycle({
 
   console.log(`${selected.forced ? "FORCED PAPER ENTRY" : "PAPER ENTRY"}: ${position.pool_name} | ${formatSol(position.amount_sol)} | score=${position.entry_score} | decision=${position.entry_decision}`);
   console.log(`Position id: ${position.id}`);
-  printStateCompact(openedState);
+  printStateCompact(openedState, { showAutoClosed: autoClosedThisCycle });
 }
 
 async function main() {
