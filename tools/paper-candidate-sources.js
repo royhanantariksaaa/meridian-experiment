@@ -1,4 +1,5 @@
 import { discoverPools, getTopCandidates } from "./screening.js";
+import { scanOfficialDlmmCandidates } from "./official-dlmm-source.js";
 
 const DEFAULT_MULTISCAN_TIMEFRAMES = ["5m", "30m", "1h", "2h", "4h"];
 const DEFAULT_MULTISCAN_CATEGORIES = ["trending", "top", "new"];
@@ -41,6 +42,10 @@ export async function scanNormalCandidates({ limit = 10 } = {}) {
   };
 }
 
+export async function scanOfficialCandidates({ limit = 10 } = {}) {
+  return scanOfficialDlmmCandidates({ limit });
+}
+
 export async function scanMultiscanCandidates({
   limit = 10,
   pageSize = 50,
@@ -79,7 +84,16 @@ export async function scanMultiscanCandidates({
 
 export async function scanCandidatePools({ source = "auto", limit = 10 } = {}) {
   if (source === "normal") return scanNormalCandidates({ limit });
+  if (source === "official") return scanOfficialCandidates({ limit });
   if (source === "multiscan") return scanMultiscanCandidates({ limit });
+
+  const official = await scanOfficialCandidates({ limit }).catch((error) => ({
+    source: "official",
+    candidates: [],
+    filtered_examples: [{ name: "official", reason: error.message }],
+    scan_summary: [{ source: "official", error: error.message }],
+  }));
+  if ((official.candidates || []).length > 0) return { ...official, source: "auto:official" };
 
   const normal = await scanNormalCandidates({ limit }).catch((error) => ({
     source: "normal",
@@ -93,7 +107,15 @@ export async function scanCandidatePools({ source = "auto", limit = 10 } = {}) {
   return {
     ...multi,
     source: "auto:multiscan",
-    filtered_examples: [...(normal.filtered_examples || []), ...(multi.filtered_examples || [])].slice(0, 8),
-    scan_summary: [...(normal.scan_summary || []), ...(multi.scan_summary || [])],
+    filtered_examples: [
+      ...(official.filtered_examples || []),
+      ...(normal.filtered_examples || []),
+      ...(multi.filtered_examples || []),
+    ].slice(0, 8),
+    scan_summary: [
+      ...(official.scan_summary || []),
+      ...(normal.scan_summary || []),
+      ...(multi.scan_summary || []),
+    ],
   };
 }
