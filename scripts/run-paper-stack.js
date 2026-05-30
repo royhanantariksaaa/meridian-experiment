@@ -22,7 +22,9 @@ const config = {
   limit: argValue("limit", "10"),
   maxOpen: argValue("max-open", "3"),
   interval: argValue("interval", "300"),
+  monitorInterval: argValue("monitor-interval", "30"),
   timeframe: argValue("timeframe", "5m"),
+  source: argValue("source", "auto"),
   forceBest: hasFlag("force-best"),
   reset: hasFlag("reset"),
   noAutoExit: hasFlag("no-auto-exit"),
@@ -93,7 +95,9 @@ function buildPaperArgs() {
     `--limit=${config.limit}`,
     `--max-open=${config.maxOpen}`,
     `--interval=${config.interval}`,
+    `--monitor-interval=${config.monitorInterval}`,
     `--timeframe=${config.timeframe}`,
+    `--source=${config.source}`,
   ];
 
   if (config.forceBest) args.push("--force-best");
@@ -140,7 +144,7 @@ console.log("=== Meridian Paper Stack ===");
 console.log("Starts: paper agent loop + read-only API + Solid dashboard");
 console.log("Dashboard: http://127.0.0.1:5173");
 console.log(`API:       http://${config.apiHost}:${config.apiPort}`);
-console.log(`Paper:     balance=${config.balance} SOL entry=${config.entry} SOL interval=${config.interval}s forceBest=${config.forceBest}`);
+console.log(`Paper:     balance=${config.balance} SOL entry=${config.entry} SOL scan=${config.interval}s monitor=${config.monitorInterval}s source=${config.source} forceBest=${config.forceBest}`);
 console.log("Press Ctrl+C to stop everything.\n");
 
 try {
