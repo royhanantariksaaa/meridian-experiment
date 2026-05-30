@@ -7,10 +7,18 @@ It does **not** replace the live Meridian screening/deploy loop yet. It is inten
 Current architecture:
 
 ```text
-upstream getTopCandidates()
-→ upstream safety/enrichment/PVP/OKX/indicator filters
-→ deterministic observer score
+candidate source
+→ local deterministic observer score
 → JSONL snapshots for later tuning
+```
+
+Supported candidate sources:
+
+```text
+upstream / normal = restored upstream getTopCandidates()
+official          = broad official DLMM /pools fetch, then local filtering + shortlist enrichment
+multiscan         = current discovery endpoint across multiple timeframes/categories
+auto              = official first, then normal, then multiscan fallback
 ```
 
 ## Files Added
@@ -19,6 +27,7 @@ upstream getTopCandidates()
 docs/strategy.md
 tools/deterministic-scoring.js
 tools/screening-observer.js
+tools/official-dlmm-source.js
 scripts/observe-screening.js
 scripts/debug-screening-funnel.js
 test/test-deterministic-screening.js
@@ -26,26 +35,34 @@ test/test-deterministic-screening.js
 
 ## Run It
 
-Preferred observer command:
+Preferred observer command using the new broad official source:
 
 ```bash
-npm run screen:observe -- --limit=10
+npm run screen:observe -- --source=official --limit=10
+```
+
+Compare sources:
+
+```bash
+npm run screen:observe -- --source=upstream --limit=10
+npm run screen:observe -- --source=official --limit=10
+npm run screen:observe -- --source=multiscan --limit=10
+npm run screen:observe -- --source=auto --limit=10
 ```
 
 Useful variants:
 
 ```bash
-npm run screen:observe -- --limit=15 --json
-npm run screen:observe -- --limit=15 --no-snapshot
+npm run screen:observe -- --source=official --limit=15 --json
+npm run screen:observe -- --source=official --limit=15 --no-snapshot
 ```
 
 The observer script will:
 
-1. Call upstream `getTopCandidates()`.
-2. Preserve upstream screening, enrichment, PVP, OKX, ATH, indicator, blacklist, and cooldown behavior.
-3. Apply the deterministic score engine to the already-enriched candidates.
-4. Print score breakdowns.
-5. Assign one of three decisions:
+1. Fetch candidates from the selected source.
+2. Apply the deterministic score engine to the candidates.
+3. Print score breakdowns.
+4. Assign one of three decisions:
 
 ```text
 AUTO_SKIP
@@ -53,7 +70,7 @@ ASK_LLM
 AUTO_DEPLOY_CANDIDATE
 ```
 
-6. Save a JSONL snapshot by default.
+5. Save a JSONL snapshot by default.
 
 Snapshots are written to:
 
@@ -62,6 +79,33 @@ logs/screening-observer/YYYY-MM-DD.jsonl
 ```
 
 The `logs/` directory is already ignored by `.gitignore`, so local snapshots will not be committed.
+
+## Official Broad Source
+
+The official source intentionally avoids relying on a narrow server-side filtered query. It broadly fetches DLMM pools from the official DLMM data API, normalizes them into the existing pool shape, applies our local thresholds, then enriches only a shortlist with pool-discovery detail data for fields that the official endpoint does not provide directly.
+
+Current source flow:
+
+```text
+GET https://dlmm.datapi.meteora.ag/pools
+→ normalize multi-window metrics into pool shape
+→ local filters: mcap, holders, volume, TVL, bin step, fee/active-TVL, blacklist/dev blocklist
+→ rank locally
+→ enrich shortlist with pool-discovery detail for volatility/organic/price/action fields
+→ final local filters: organic + volatility
+```
+
+Cache files are written under:
+
+```text
+logs/market-cache/
+```
+
+Run paper simulation using the broad source:
+
+```bash
+npm run paper:stack -- --source=official --limit=10 --reset
+```
 
 ## Screening Funnel Debugger
 
@@ -108,7 +152,7 @@ The older direct test still exists:
 node test/test-deterministic-screening.js --snapshot
 ```
 
-That test is useful for scoring `discoverPools()` output directly, but the preferred workflow is now `npm run screen:observe` because it layers on top of upstream `getTopCandidates()` instead of bypassing upstream enrichment.
+That test is useful for scoring `discoverPools()` output directly, but the preferred workflow is now `npm run screen:observe` because it layers on top of selectable candidate sources.
 
 ## Decision Bands
 
@@ -177,15 +221,15 @@ low token fees = hard skip
 
 ## Next Step
 
-Use `npm run screen:observe` and `node scripts/debug-screening-funnel.js` for dry-run observation first. After enough snapshots, compare:
+Use `npm run screen:observe -- --source=official` and paper-test `--source=official` first. After enough snapshots, compare:
 
 ```text
 deterministic score
-LLM decision
+source type
 future fee capture
 future PnL
 out-of-range behavior
 rug/wash failures
 ```
 
-Only after that should the deterministic decision bands be wired into `runScreeningCycle()` for LLM bypass or auto-deploy behavior.
+Only after that should the official broad source be considered for the live `runScreeningCycle()` path.
