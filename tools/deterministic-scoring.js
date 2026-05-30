@@ -46,6 +46,16 @@ function getVolume(pool) {
   return numeric(pool.volume_window ?? pool.volume, 0);
 }
 
+function hasSmartWalletSignal(pool) {
+  return pool.smart_wallet_buy === true ||
+    pool.smart_wallets_present === true ||
+    numeric(pool.smart_wallet_count, 0) > 0 ||
+    numeric(pool.smart_wallets_count, 0) > 0 ||
+    numeric(pool.sw?.in_pool?.length, 0) > 0 ||
+    (Array.isArray(pool.smart_wallets) && pool.smart_wallets.length > 0) ||
+    (Array.isArray(pool.in_pool) && pool.in_pool.length > 0);
+}
+
 export function calculateVolumeActiveTvlRatio(pool) {
   const activeTvl = getTvl(pool);
   if (activeTvl <= 0) return 0;
@@ -97,19 +107,19 @@ function collectHardFlags(pool, options) {
   const s = options.screening ?? config.screening;
   const flags = [];
   const botPct = maybeNumeric(pool.bot_holders_pct ?? pool.audit?.bot_holders_pct);
-  const top10Pct = maybeNumeric(pool.top10_pct ?? pool.top_holders_pct ?? pool.audit?.top_holders_pct);
   const feesSol = maybeNumeric(pool.fees_sol ?? pool.global_fees_sol);
   const volatility = maybeNumeric(pool.volatility);
   const launchpad = pool.launchpad;
 
+  // Match upstream prompt semantics:
+  // - wash, unusable volatility, bot-holder excess, low token fees, and blocked launchpads are hard skips.
+  // - rugpull is default-skip unless smart wallets are present.
+  // - top10 concentration is a risk penalty, not a hard skip.
   if (pool.is_wash === true) flags.push("wash trading flagged");
-  if (pool.is_rugpull === true) flags.push("rugpull flagged");
+  if (pool.is_rugpull === true && !hasSmartWalletSignal(pool)) flags.push("rugpull flagged with no smart-wallet override");
   if (volatility == null || volatility <= 0) flags.push("unusable volatility");
   if (botPct != null && s.maxBotHoldersPct != null && botPct > s.maxBotHoldersPct) {
     flags.push(`bot holders ${botPct}% > ${s.maxBotHoldersPct}%`);
-  }
-  if (top10Pct != null && s.maxTop10Pct != null && top10Pct > s.maxTop10Pct) {
-    flags.push(`top10 holders ${top10Pct}% > ${s.maxTop10Pct}%`);
   }
   if (feesSol != null && s.minTokenFeesSol != null && feesSol < s.minTokenFeesSol) {
     flags.push(`token fees ${feesSol} SOL < ${s.minTokenFeesSol} SOL`);
@@ -130,7 +140,7 @@ function collectPenalties(pool, options) {
 
   add("pvp_risk", pool.is_pvp ? 14 : 0);
   add("wash", booleanPenalty(pool.is_wash, 100));
-  add("rugpull", booleanPenalty(pool.is_rugpull, 70));
+  add("rugpull", booleanPenalty(pool.is_rugpull, hasSmartWalletSignal(pool) ? 45 : 70));
   add("bundle_pct", pctOverLimitPenalty(pool.bundle_pct, s.maxBundlePct, 15));
   add("sniper_pct", pctOverLimitPenalty(pool.sniper_pct, 35, 10));
   add("suspicious_pct", pctOverLimitPenalty(pool.suspicious_pct, 25, 18));
@@ -145,6 +155,11 @@ function collectPenalties(pool, options) {
   if (ageHours != null && ageHours > 72) add("old_pool", 4);
 
   return penalties;
+}
+
+function scoreSmartWalletSignal(pool) {
+  if (!hasSmartWalletSignal(pool)) return 0;
+  return 5;
 }
 
 export function scoreDeterministicCandidate(pool, options = {}) {
@@ -164,6 +179,7 @@ export function scoreDeterministicCandidate(pool, options = {}) {
     holders: clamp(holders / 3000) * 8,
     volatility_fit: scoreVolatilityFit(volatility) * 10,
     trend: scoreTrend(pool) * 5,
+    smart_wallet_signal: scoreSmartWalletSignal(pool),
     safety_baseline: 10,
   };
 
@@ -219,6 +235,7 @@ export function scoreDeterministicCandidate(pool, options = {}) {
       volatility,
       unique_traders: uniqueTraders,
       swap_count: swapCount,
+      smart_wallet_signal: hasSmartWalletSignal(pool),
     },
     thresholds: {
       ask_llm_score: askLlmScore,
