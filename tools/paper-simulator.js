@@ -58,6 +58,10 @@ function mergeExitRules(exitRules = {}) {
   };
 }
 
+function resolvePaperRefreshTimeframe(position, fallback = "5m") {
+  return position?.source_timeframe || fallback || "5m";
+}
+
 function blankState(balanceSol = DEFAULT_BALANCE_SOL) {
   const balance = numeric(balanceSol, DEFAULT_BALANCE_SOL);
   return {
@@ -253,6 +257,8 @@ export function openPaperPosition({
     forced,
     decision: deterministic.decision,
     score: deterministic.score,
+    source_timeframe: position.source_timeframe,
+    source_category: position.source_category,
   });
   saveState(state);
   return { state, position };
@@ -307,7 +313,8 @@ export function getPaperAutoExit(position, exitRules = {}) {
 }
 
 export async function refreshPaperPosition(position, { timeframe = "5m" } = {}) {
-  const detail = await getPoolDetail({ pool_address: position.pool, timeframe });
+  const effectiveTimeframe = resolvePaperRefreshTimeframe(position, timeframe);
+  const detail = await getPoolDetail({ pool_address: position.pool, timeframe: effectiveTimeframe });
   const currentPrice = getPoolPrice(detail);
   const volumeActiveTvlRatio = getPoolVolumeActiveTvlRatio(detail);
   const feeActiveTvlRatio = maybeNumeric(detail?.fee_active_tvl_ratio);
@@ -324,7 +331,9 @@ export async function refreshPaperPosition(position, { timeframe = "5m" } = {}) 
 
   const metrics = {
     checked_at: nowIso(),
-    timeframe,
+    timeframe: effectiveTimeframe,
+    configured_timeframe: timeframe,
+    entry_timeframe: position.source_timeframe ?? null,
     held_minutes: heldMinutes,
     current_price: currentPrice,
     price_change_from_entry_pct: round(priceChangeFromEntryPct, 4),
@@ -352,10 +361,21 @@ export async function refreshPaperState({ timeframe = "5m", autoClose = false, e
 
   for (const position of state.open_positions) {
     let nextPosition;
+    const effectiveTimeframe = resolvePaperRefreshTimeframe(position, timeframe);
     try {
       nextPosition = await refreshPaperPosition(position, { timeframe });
     } catch (error) {
-      nextPosition = { ...position, last_check: { checked_at: nowIso(), timeframe, error: error.message, exit_signals: ["refresh failed"] } };
+      nextPosition = {
+        ...position,
+        last_check: {
+          checked_at: nowIso(),
+          timeframe: effectiveTimeframe,
+          configured_timeframe: timeframe,
+          entry_timeframe: position.source_timeframe ?? null,
+          error: error.message,
+          exit_signals: ["refresh failed"],
+        },
+      };
     }
 
     const exit = autoClose ? getPaperAutoExit(nextPosition, exitRules) : null;
@@ -371,6 +391,7 @@ export async function refreshPaperState({ timeframe = "5m", autoClose = false, e
         realized_pnl_pct: closed.realized_pnl_pct,
         realized_pnl_sol: closed.realized_pnl_sol,
         balance_sol: state.balance_sol,
+        timeframe: closed.last_check?.timeframe ?? effectiveTimeframe,
       });
       autoClosed.push(closed);
     } else {
@@ -378,9 +399,19 @@ export async function refreshPaperState({ timeframe = "5m", autoClose = false, e
     }
   }
 
+  const effectiveTimeframes = [...new Set([...refreshed, ...autoClosed]
+    .map((position) => position.last_check?.timeframe || position.source_timeframe)
+    .filter(Boolean))];
   state.open_positions = refreshed;
   state.last_auto_closed = autoClosed;
-  state.events.push({ ts: nowIso(), type: "REFRESH", timeframe, count: refreshed.length, auto_closed: autoClosed.length });
+  state.events.push({
+    ts: nowIso(),
+    type: "REFRESH",
+    timeframe,
+    effective_timeframes: effectiveTimeframes,
+    count: refreshed.length,
+    auto_closed: autoClosed.length,
+  });
   saveState(state);
   return state;
 }
