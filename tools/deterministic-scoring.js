@@ -6,6 +6,9 @@ export const DETERMINISTIC_DECISIONS = Object.freeze({
   AUTO_DEPLOY_CANDIDATE: "AUTO_DEPLOY_CANDIDATE",
 });
 
+const DEFAULT_MIN_VOLUME_ACTIVE_TVL_FOR_LLM = 1.0;
+const DEFAULT_MIN_VOLUME_ACTIVE_TVL_FOR_AUTO_DEPLOY = 3.0;
+
 function numeric(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
@@ -172,15 +175,26 @@ export function scoreDeterministicCandidate(pool, options = {}) {
 
   const autoDeployScore = numeric(options.autoDeployScore ?? 85, 85);
   const askLlmScore = numeric(options.askLlmScore ?? 65, 65);
+  const minVolumeActiveTvlForLlm = numeric(
+    options.minVolumeActiveTvlForLlm ?? DEFAULT_MIN_VOLUME_ACTIVE_TVL_FOR_LLM,
+    DEFAULT_MIN_VOLUME_ACTIVE_TVL_FOR_LLM,
+  );
+  const minVolumeActiveTvlForAutoDeploy = numeric(
+    options.minVolumeActiveTvlForAutoDeploy ?? DEFAULT_MIN_VOLUME_ACTIVE_TVL_FOR_AUTO_DEPLOY,
+    DEFAULT_MIN_VOLUME_ACTIVE_TVL_FOR_AUTO_DEPLOY,
+  );
   let decision = DETERMINISTIC_DECISIONS.AUTO_SKIP;
   let reason = "score below LLM-review threshold";
 
   if (hardFlags.length > 0) {
     decision = DETERMINISTIC_DECISIONS.AUTO_SKIP;
     reason = `hard flag: ${hardFlags[0]}`;
-  } else if (score >= autoDeployScore) {
+  } else if (volumeActiveTvlRatio < minVolumeActiveTvlForLlm) {
+    decision = DETERMINISTIC_DECISIONS.AUTO_SKIP;
+    reason = `volume/activeTVL ${volumeActiveTvlRatio.toFixed(4)}x below LLM threshold ${minVolumeActiveTvlForLlm}x`;
+  } else if (score >= autoDeployScore && volumeActiveTvlRatio >= minVolumeActiveTvlForAutoDeploy) {
     decision = DETERMINISTIC_DECISIONS.AUTO_DEPLOY_CANDIDATE;
-    reason = `score ${score} >= auto-deploy candidate threshold ${autoDeployScore}`;
+    reason = `score ${score} >= ${autoDeployScore} and volume/activeTVL ${volumeActiveTvlRatio.toFixed(4)}x >= ${minVolumeActiveTvlForAutoDeploy}x`;
   } else if (score >= askLlmScore) {
     decision = DETERMINISTIC_DECISIONS.ASK_LLM;
     reason = `score ${score} is in gray zone ${askLlmScore}-${autoDeployScore - 1}`;
@@ -205,6 +219,12 @@ export function scoreDeterministicCandidate(pool, options = {}) {
       volatility,
       unique_traders: uniqueTraders,
       swap_count: swapCount,
+    },
+    thresholds: {
+      ask_llm_score: askLlmScore,
+      auto_deploy_score: autoDeployScore,
+      min_volume_active_tvl_for_llm: minVolumeActiveTvlForLlm,
+      min_volume_active_tvl_for_auto_deploy: minVolumeActiveTvlForAutoDeploy,
     },
     components: Object.fromEntries(
       Object.entries(components).map(([key, value]) => [key, Number(value.toFixed(2))]),
