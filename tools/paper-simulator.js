@@ -132,6 +132,38 @@ function estimatePaperPnlPct(position) {
   return round(feeProxyPct + downsideInventoryProxy, 4);
 }
 
+function estimateFeeProxyFromDelta({ position, currentFeeActiveTvlRatio }) {
+  const amount = numeric(position?.amount_sol, 0);
+  const entryFee = maybeNumeric(position?.entry_fee_active_tvl_ratio);
+  const currentFee = maybeNumeric(currentFeeActiveTvlRatio);
+
+  if (amount <= 0 || currentFee == null) {
+    return {
+      model: "fee_active_tvl_delta_v1",
+      entry_fee_active_tvl_ratio: entryFee,
+      current_fee_active_tvl_ratio: currentFee,
+      fee_active_tvl_delta_pct: null,
+      gross_fee_proxy_pct: null,
+      fee_proxy_pct: 0,
+      fee_proxy_sol: null,
+    };
+  }
+
+  // Pool fee/aTVL is a rolling pool-level metric. A paper position should only
+  // receive credit for the increase after entry, not the full rolling value.
+  const deltaPct = entryFee == null ? currentFee : currentFee - entryFee;
+  const creditedPct = Math.max(0, deltaPct);
+  return {
+    model: "fee_active_tvl_delta_v1",
+    entry_fee_active_tvl_ratio: entryFee,
+    current_fee_active_tvl_ratio: currentFee,
+    fee_active_tvl_delta_pct: round(deltaPct, 6),
+    gross_fee_proxy_pct: round(creditedPct, 6),
+    fee_proxy_pct: round(creditedPct, 6),
+    fee_proxy_sol: amount * (creditedPct / 100),
+  };
+}
+
 function estimatePaperPnlFromMetrics({ amountSol, feeProxySol, priceChangePct }) {
   const amount = numeric(amountSol, 0);
   const feePct = amount > 0 ? (numeric(feeProxySol, 0) / amount) * 100 : 0;
@@ -322,10 +354,13 @@ export async function refreshPaperPosition(position, { timeframe = "5m" } = {}) 
     ? ((currentPrice - position.entry_price) / position.entry_price) * 100
     : null;
   const heldMinutes = Math.max(0, Math.floor((Date.now() - new Date(position.opened_at).getTime()) / 60_000));
-  const feeProxySol = feeActiveTvlRatio != null ? position.amount_sol * (feeActiveTvlRatio / 100) : null;
+  const feeProxy = estimateFeeProxyFromDelta({
+    position,
+    currentFeeActiveTvlRatio: feeActiveTvlRatio,
+  });
   const estimates = estimatePaperPnlFromMetrics({
     amountSol: position.amount_sol,
-    feeProxySol,
+    feeProxySol: feeProxy.fee_proxy_sol,
     priceChangePct: priceChangeFromEntryPct,
   });
 
@@ -337,11 +372,15 @@ export async function refreshPaperPosition(position, { timeframe = "5m" } = {}) 
     held_minutes: heldMinutes,
     current_price: currentPrice,
     price_change_from_entry_pct: round(priceChangeFromEntryPct, 4),
+    entry_fee_active_tvl_ratio: feeProxy.entry_fee_active_tvl_ratio,
     fee_active_tvl_ratio: feeActiveTvlRatio,
+    fee_active_tvl_ratio_delta: feeProxy.fee_active_tvl_delta_pct,
+    fee_proxy_model: feeProxy.model,
+    gross_fee_proxy_pct: feeProxy.gross_fee_proxy_pct,
     volume: maybeNumeric(detail?.volume),
     active_tvl: maybeNumeric(detail?.active_tvl ?? detail?.tvl),
     volume_active_tvl_ratio: round(volumeActiveTvlRatio, 4),
-    fee_proxy_sol: round(feeProxySol, 9),
+    fee_proxy_sol: round(feeProxy.fee_proxy_sol, 9),
     ...estimates,
   };
 
