@@ -14,7 +14,7 @@ function argValue(name, fallback = null) {
 
 const ROOT_DIR = process.cwd();
 const DASHBOARD_DIR = path.join(ROOT_DIR, "dashboard");
-const VITE_BIN = path.join(ROOT_DIR, "node_modules", "vite", "bin", "vite.js");
+const VITE_BIN = path.join(DASHBOARD_DIR, "node_modules", "vite", "bin", "vite.js");
 
 const config = {
   balance: argValue("balance", "0.1"),
@@ -108,7 +108,7 @@ function buildPaperArgs() {
 
 function buildDashboardArgs() {
   if (!fs.existsSync(VITE_BIN)) {
-    throw new Error(`Vite not found at ${VITE_BIN}. Run npm install from the repo root first.`);
+    throw new Error(`Vite not found at ${VITE_BIN}. Run npm install --workspace dashboard from the repo root.`);
   }
   return [VITE_BIN, "--host", "127.0.0.1", "--port", "5173"];
 }
