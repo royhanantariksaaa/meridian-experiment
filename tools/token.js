@@ -1,11 +1,27 @@
 const DATAPI_BASE = "https://datapi.jup.ag/v1";
+const JUP_DATAPI_TIMEOUT_MS = Number(process.env.JUP_DATAPI_TIMEOUT_MS || 8_000);
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = JUP_DATAPI_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`Jupiter Data API timeout after ${timeoutMs}ms: ${url}`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * Get the narrative/story behind a token from Jupiter ChainInsight.
  * Useful for understanding if a token has a real community/theme vs nothing.
  */
 export async function getTokenNarrative({ mint }) {
-  const res = await fetch(`${DATAPI_BASE}/chaininsight/narrative/${mint}`);
+  const res = await fetchWithTimeout(`${DATAPI_BASE}/chaininsight/narrative/${mint}`);
   if (!res.ok) throw new Error(`Narrative API error: ${res.status}`);
   const data = await res.json();
   return {
@@ -21,7 +37,7 @@ export async function getTokenNarrative({ mint }) {
  */
 export async function getTokenInfo({ query }) {
   const url = `${DATAPI_BASE}/assets/search?query=${encodeURIComponent(query)}`;
-  const res = await fetch(url);
+  const res = await fetchWithTimeout(url);
   if (!res.ok) throw new Error(`Token search API error: ${res.status}`);
   const data = await res.json();
   const tokens = Array.isArray(data) ? data : [data];
@@ -61,23 +77,23 @@ export async function getTokenInfo({ query }) {
   // Enrich first result with OKX smart money + risk data (public endpoint, no key needed)
   if (results[0]?.mint) {
     const { getAdvancedInfo, getClusterList } = await import("./okx.js");
-    const [adv, clusters] = await Promise.all([
+    const [adv, clusters] = await Promise.allSettled([
       getAdvancedInfo(results[0].mint).catch(() => null),
       getClusterList(results[0].mint).catch(() => []),
     ]);
-    if (adv) {
-      results[0].risk_level      = adv.risk_level;
-      results[0].bundle_pct      = adv.bundle_pct;
-      results[0].sniper_pct      = adv.sniper_pct;
-      results[0].suspicious_pct  = adv.suspicious_pct;
-      results[0].new_wallet_pct  = adv.new_wallet_pct;
-      results[0].smart_money_buy = adv.smart_money_buy;
-      results[0].tags            = adv.tags;
+    if (adv.status === "fulfilled" && adv.value) {
+      results[0].risk_level      = adv.value.risk_level;
+      results[0].bundle_pct      = adv.value.bundle_pct;
+      results[0].sniper_pct      = adv.value.sniper_pct;
+      results[0].suspicious_pct  = adv.value.suspicious_pct;
+      results[0].new_wallet_pct  = adv.value.new_wallet_pct;
+      results[0].smart_money_buy = adv.value.smart_money_buy;
+      results[0].tags            = adv.value.tags;
     }
-    if (clusters?.length) {
-      results[0].kol_in_clusters   = clusters.some((c) => c.has_kol);
-      results[0].top_cluster_trend = clusters[0]?.trend ?? null;
-      results[0].clusters          = clusters;
+    if (clusters.status === "fulfilled" && clusters.value?.length) {
+      results[0].kol_in_clusters   = clusters.value.some((c) => c.has_kol);
+      results[0].top_cluster_trend = clusters.value[0]?.trend ?? null;
+      results[0].clusters          = clusters.value;
     }
   }
 
@@ -91,8 +107,8 @@ export async function getTokenInfo({ query }) {
 export async function getTokenHolders({ mint, limit = 20 }) {
   // Fetch holders and total supply in parallel
   const [holdersRes, tokenRes] = await Promise.all([
-    fetch(`${DATAPI_BASE}/holders/${mint}?limit=100`),
-    fetch(`${DATAPI_BASE}/assets/search?query=${mint}`),
+    fetchWithTimeout(`${DATAPI_BASE}/holders/${mint}?limit=100`),
+    fetchWithTimeout(`${DATAPI_BASE}/assets/search?query=${mint}`),
   ]);
   if (!holdersRes.ok) throw new Error(`Holders API error: ${holdersRes.status}`);
   const data = await holdersRes.json();
@@ -139,7 +155,7 @@ export async function getTokenHolders({ mint, limit = 20 }) {
 
   if (smartWallets.length > 0) {
     const addresses = smartWallets.map((w) => w.address).join(",");
-    const kwRes = await fetch(
+    const kwRes = await fetchWithTimeout(
       `${DATAPI_BASE}/holders/${mint}?addresses=${addresses}`
     ).catch(() => null);
     const kwData = kwRes?.ok ? await kwRes.json() : null;
@@ -156,7 +172,7 @@ export async function getTokenHolders({ mint, limit = 20 }) {
 
       let pnl = null;
       try {
-        const pnlRes = await fetch(`${DATAPI_BASE}/pnl-positions?address=${h.addr}&assetId=${mint}`);
+        const pnlRes = await fetchWithTimeout(`${DATAPI_BASE}/pnl-positions?address=${h.addr}&assetId=${mint}`);
         if (pnlRes.ok) {
           const pnlData = await pnlRes.json();
           const pos = pnlData?.[h.addr]?.tokenPositions?.[0];
