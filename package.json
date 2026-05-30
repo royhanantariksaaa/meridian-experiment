@@ -1,9 +1,13 @@
 {
   "name": "dlmm-agent",
   "version": "1.0.0",
+  "private": true,
   "type": "module",
   "description": "Autonomous DLMM LP agent for Meteora on Solana",
   "main": "index.js",
+  "workspaces": [
+    "dashboard"
+  ],
   "bin": {
     "meridian": "cli.js"
   },
@@ -15,6 +19,10 @@
     "pm2:restart": "pm2 restart meridian --update-env",
     "pm2:logs": "pm2 logs meridian --lines 100",
     "dev": "DRY_RUN=true node index.js",
+    "paper:agent": "node test/paper-agent.js",
+    "paper:api": "node scripts/paper-dashboard-api.js",
+    "paper:dashboard": "npm run dev --workspace dashboard",
+    "paper:stack": "node scripts/run-paper-stack.js",
     "test": "npm run test:syntax",
     "test:syntax": "find . -path ./node_modules -prune -o -name '*.js' -exec node --check {} \\;",
     "test:screen": "node test/test-screening.js",
