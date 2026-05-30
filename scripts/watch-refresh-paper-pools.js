@@ -99,7 +99,26 @@ async function main() {
   const pendingByPool = new Map();
   let refreshInFlight = false;
 
+  function clearPendingTimer(pool, reason = "cleared") {
+    const timer = pendingByPool.get(pool);
+    if (!timer) return false;
+    clearTimeout(timer);
+    pendingByPool.delete(pool);
+    appendEvent({ type: "pending_timer_cleared", pool, reason });
+    return true;
+  }
+
+  function hasOpenPositionForPool(pool) {
+    return getOpenPaperPools().some((position) => position.pool === pool);
+  }
+
   async function triggerRefresh(meta, reason) {
+    if (!hasOpenPositionForPool(meta.pool)) {
+      clearPendingTimer(meta.pool, "no_open_position_before_refresh");
+      appendEvent({ type: "refresh_skipped", reason: "no_open_position", pool: meta.pool, pool_name: meta.pool_name, trigger_reason: reason });
+      return;
+    }
+
     const now = Date.now();
     const last = lastRefreshByPool.get(meta.pool) || 0;
     const elapsed = now - last;
@@ -159,6 +178,8 @@ async function main() {
   async function unsubscribePool(pool) {
     const sub = subscriptions.get(pool);
     if (!sub) return;
+    clearPendingTimer(pool, "unsubscribe");
+    lastRefreshByPool.delete(pool);
     if (sub.accountSubId != null) await connection.removeAccountChangeListener(sub.accountSubId).catch(() => {});
     subscriptions.delete(pool);
     appendEvent({ type: "unsubscribe", pool, pool_name: sub.meta?.pool_name });
@@ -209,12 +230,15 @@ async function main() {
     for (const pool of [...subscriptions.keys()]) {
       if (!wanted.has(pool)) await unsubscribePool(pool);
     }
+    for (const pool of [...pendingByPool.keys()]) {
+      if (!wanted.has(pool)) clearPendingTimer(pool, "reconcile_no_open_position");
+    }
     for (const meta of wanted.values()) {
       await subscribePool(meta);
     }
 
-    appendEvent({ type: "heartbeat", open_positions: open.length, subscriptions: subscriptions.size });
-    console.log(`[ws-refresh] heartbeat open=${open.length} subs=${subscriptions.size} events=${EVENT_FILE}`);
+    appendEvent({ type: "heartbeat", open_positions: open.length, subscriptions: subscriptions.size, pending_timers: pendingByPool.size });
+    console.log(`[ws-refresh] heartbeat open=${open.length} subs=${subscriptions.size} pending=${pendingByPool.size} events=${EVENT_FILE}`);
   }
 
   console.log("=== Paper Pool WebSocket Refresh Watcher ===");
@@ -229,7 +253,7 @@ async function main() {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log("\n[ws-refresh] shutting down...");
-    for (const timer of pendingByPool.values()) clearTimeout(timer);
+    for (const pool of [...pendingByPool.keys()]) clearPendingTimer(pool, "shutdown");
     for (const pool of [...subscriptions.keys()]) await unsubscribePool(pool);
     appendEvent({ type: "stop" });
     process.exit(0);
