@@ -6,6 +6,7 @@ import {
   BarChart3,
   Clock,
   PauseCircle,
+  Radio,
   RefreshCcw,
   ShieldCheck,
   Sparkles,
@@ -14,11 +15,11 @@ import {
   Wallet,
 } from "lucide-solid";
 import "./index.css";
-import { Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Progress, Separator } from "./components/ui";
+import { Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Progress } from "./components/ui";
 import { cn, formatPct, formatRatio, formatSol, shortId, timeAgo } from "./lib/utils";
 
 const API_BASE = import.meta.env.VITE_DASHBOARD_API || "http://127.0.0.1:8787";
-const REFRESH_MS = 5000;
+const FALLBACK_REFRESH_MS = 10000;
 
 function StatCard(props) {
   return (
@@ -37,11 +38,54 @@ function StatCard(props) {
   );
 }
 
+function RuntimeCard(props) {
+  const r = () => props.runtime || {};
+  const connected = () => props.connected;
+  const stale = createMemo(() => Number(r()?.heartbeat_age_ms ?? 999999) > 120000);
+  return (
+    <Card class={cn("mt-4", stale() && "border-yellow-500/30")}> 
+      <CardHeader>
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <CardTitle class="flex items-center gap-2"><Radio size={18} /> Live Backend Status</CardTitle>
+            <CardDescription>SSE stream, paper-agent heartbeat, scan source, and next action.</CardDescription>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <Badge variant={connected() ? "green" : "red"}>{connected() ? "SSE live" : "SSE offline"}</Badge>
+            <Badge variant={stale() ? "yellow" : "green"}>{stale() ? "agent stale" : "agent alive"}</Badge>
+            <Badge variant="blue">{r()?.mode || r()?.phase || "unknown"}</Badge>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div class="grid gap-3 text-sm md:grid-cols-4">
+          <div class="rounded-xl bg-secondary/50 p-3">
+            <div class="text-muted-foreground">Candidate source</div>
+            <div class="font-semibold">{r()?.source || r()?.used_candidate_source || "—"}</div>
+          </div>
+          <div class="rounded-xl bg-secondary/50 p-3">
+            <div class="text-muted-foreground">Heartbeat</div>
+            <div class="font-semibold">{timeAgo(r()?.heartbeat_at || r()?.updated_at)}</div>
+          </div>
+          <div class="rounded-xl bg-secondary/50 p-3">
+            <div class="text-muted-foreground">Next action</div>
+            <div class="font-semibold">{r()?.next_action || r()?.phase || "—"}</div>
+          </div>
+          <div class="rounded-xl bg-secondary/50 p-3">
+            <div class="text-muted-foreground">Countdown</div>
+            <div class="font-semibold">{r()?.next_action_in_sec ?? r()?.seconds_until_next_monitor ?? "—"}s</div>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function PositionCard(props) {
   const p = () => props.position;
   const check = () => p()?.last_check || {};
   const danger = createMemo(() => (check().exit_signals || []).length > 0);
-  const pnl = createMemo(() => Number(p()?.realized_pnl_sol ?? 0));
+  const pnl = createMemo(() => Number(p()?.realized_pnl_sol ?? check()?.estimated_paper_pnl_sol ?? 0));
 
   return (
     <Card class={cn("transition", danger() && "border-yellow-500/30")}> 
@@ -83,20 +127,8 @@ function PositionCard(props) {
           </div>
         </div>
 
-        <Show when={p()?.status === "CLOSED"}>
-          <div class={cn("rounded-xl border p-3", pnl() >= 0 ? "border-emerald-500/30 bg-emerald-500/10" : "border-red-500/30 bg-red-500/10")}>
-            <div class="flex items-center justify-between gap-4">
-              <div>
-                <div class="text-sm font-medium">Closed: {p()?.close_reason}</div>
-                <div class="text-xs text-muted-foreground">{timeAgo(p()?.closed_at)}</div>
-              </div>
-              <div class={cn("font-semibold", pnl() >= 0 ? "text-emerald-300" : "text-red-300")}>{formatSol(p()?.realized_pnl_sol, 6)}</div>
-            </div>
-          </div>
-        </Show>
-
         <Show when={p()?.last_check}>
-          <div class="grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
+          <div class="grid grid-cols-2 gap-3 text-sm md:grid-cols-5">
             <div>
               <div class="text-muted-foreground">Held</div>
               <div class="font-semibold">{check().held_minutes ?? 0}m</div>
@@ -113,6 +145,17 @@ function PositionCard(props) {
               <div class="text-muted-foreground">Price change</div>
               <div class={cn("font-semibold", Number(check().price_change_from_entry_pct) < 0 ? "text-red-300" : "text-emerald-300")}>{formatPct(check().price_change_from_entry_pct)}</div>
             </div>
+            <div>
+              <div class="text-muted-foreground">Est. paper PnL</div>
+              <div class={cn("font-semibold", Number(check().estimated_paper_pnl_pct) < 0 ? "text-red-300" : "text-emerald-300")}>{formatPct(check().estimated_paper_pnl_pct)}</div>
+            </div>
+          </div>
+          <div class="rounded-xl border border-border bg-secondary/30 p-3 text-sm">
+            <div class="grid gap-2 md:grid-cols-3">
+              <div><span class="text-muted-foreground">Fee proxy:</span> {formatPct(check().fee_proxy_pct)} / {formatSol(check().fee_proxy_sol, 6)}</div>
+              <div><span class="text-muted-foreground">Inventory proxy:</span> {formatPct(check().estimated_inventory_pnl_pct)}</div>
+              <div><span class="text-muted-foreground">Est. PnL SOL:</span> {formatSol(check().estimated_paper_pnl_sol, 6)}</div>
+            </div>
           </div>
           <Show when={(check().exit_signals || []).length > 0}>
             <div class="space-y-2">
@@ -122,6 +165,18 @@ function PositionCard(props) {
               </div>
             </div>
           </Show>
+        </Show>
+
+        <Show when={p()?.status === "CLOSED"}>
+          <div class={cn("rounded-xl border p-3", pnl() >= 0 ? "border-emerald-500/30 bg-emerald-500/10" : "border-red-500/30 bg-red-500/10")}>
+            <div class="flex items-center justify-between gap-4">
+              <div>
+                <div class="text-sm font-medium">Closed: {p()?.close_reason}</div>
+                <div class="text-xs text-muted-foreground">{timeAgo(p()?.closed_at)}</div>
+              </div>
+              <div class={cn("font-semibold", pnl() >= 0 ? "text-emerald-300" : "text-red-300")}>{formatSol(p()?.realized_pnl_sol, 6)}</div>
+            </div>
+          </div>
         </Show>
       </CardContent>
     </Card>
@@ -183,6 +238,7 @@ function App() {
   const [data, setData] = createSignal(null);
   const [error, setError] = createSignal(null);
   const [loading, setLoading] = createSignal(true);
+  const [sseConnected, setSseConnected] = createSignal(false);
 
   async function load() {
     try {
@@ -199,16 +255,39 @@ function App() {
 
   createEffect(() => {
     load();
-    const timer = setInterval(load, REFRESH_MS);
-    return () => clearInterval(timer);
+    const es = new EventSource(`${API_BASE}/api/events`);
+    es.addEventListener("open", () => setSseConnected(true));
+    es.addEventListener("summary", (event) => {
+      try {
+        setData(JSON.parse(event.data));
+        setError(null);
+        setLoading(false);
+        setSseConnected(true);
+      } catch (e) {
+        setError(e.message || String(e));
+      }
+    });
+    es.addEventListener("error", () => {
+      setSseConnected(false);
+      load();
+    });
+    const fallback = setInterval(() => {
+      if (!sseConnected()) load();
+    }, FALLBACK_REFRESH_MS);
+    return () => {
+      es.close();
+      clearInterval(fallback);
+    };
   });
 
   const state = createMemo(() => data()?.paper?.state || {});
   const summary = createMemo(() => data()?.paper?.summary || {});
+  const runtime = createMemo(() => data()?.runtime || {});
   const openPositions = createMemo(() => state()?.open_positions || []);
   const closedPositions = createMemo(() => (state()?.closed_positions || []).slice().reverse());
   const latestObserver = createMemo(() => data()?.screening?.observer?.payload || null);
-  const latestCandidates = createMemo(() => latestObserver()?.observations || latestObserver()?.ranked || []);
+  const latestSnapshot = createMemo(() => data()?.screening?.snapshots?.payload || null);
+  const latestCandidates = createMemo(() => latestObserver()?.observations || latestSnapshot()?.ranked || []);
   const balanceProgress = createMemo(() => {
     const start = Number(summary()?.starting_balance_sol || 0);
     const bal = Number(summary()?.balance_sol || 0);
@@ -246,6 +325,8 @@ function App() {
         <StatCard label="Open Positions" value={summary()?.open_count ?? 0} hint={`${summary()?.closed_count || 0} closed paper positions`} icon={<Activity size={18} />} />
         <StatCard label="Last Update" value={timeAgo(summary()?.last_updated)} hint={summary()?.last_updated || "No paper state yet"} icon={<Clock size={18} />} />
       </div>
+
+      <RuntimeCard runtime={runtime()} connected={sseConnected()} />
 
       <Card class="mt-4">
         <CardHeader>
