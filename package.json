@@ -23,6 +23,7 @@
     "paper:api": "node scripts/paper-dashboard-api.js",
     "paper:dashboard": "npm run dev --workspace dashboard",
     "paper:stack": "node scripts/run-paper-stack.js",
+    "screen:observe": "node scripts/observe-screening.js",
     "test": "npm run test:syntax",
     "test:syntax": "find . -path ./node_modules -prune -o -name '*.js' -exec node --check {} \\;",
     "test:screen": "node test/test-screening.js",
