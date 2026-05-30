@@ -1,4 +1,5 @@
 import {
+  DEFAULT_PAPER_EXIT_RULES,
   loadPaperState,
   openPaperPosition,
   refreshPaperState,
@@ -27,13 +28,34 @@ function formatSol(value) {
   return `${n.toFixed(4)} SOL`;
 }
 
+function buildExitRules() {
+  return {
+    ...DEFAULT_PAPER_EXIT_RULES,
+    minHoldBeforeWeakExitMinutes: Number(argValue("weak-exit-min", DEFAULT_PAPER_EXIT_RULES.minHoldBeforeWeakExitMinutes)),
+    forcedMaxHoldMinutes: Number(argValue("forced-max-hold", DEFAULT_PAPER_EXIT_RULES.forcedMaxHoldMinutes)),
+    maxHoldMinutes: Number(argValue("max-hold", DEFAULT_PAPER_EXIT_RULES.maxHoldMinutes)),
+    minVolumeActiveTvlRatio: Number(argValue("min-vol-ratio", DEFAULT_PAPER_EXIT_RULES.minVolumeActiveTvlRatio)),
+    minFeeActiveTvlRatio: Number(argValue("min-fee-tvl", DEFAULT_PAPER_EXIT_RULES.minFeeActiveTvlRatio)),
+    stopLossPct: Number(argValue("stop-loss", DEFAULT_PAPER_EXIT_RULES.stopLossPct)),
+    takeProfitFeeProxyPct: Number(argValue("take-profit", DEFAULT_PAPER_EXIT_RULES.takeProfitFeeProxyPct)),
+  };
+}
+
 function printStateCompact(state) {
   console.log(`Virtual balance: ${formatSol(state.balance_sol)} | open=${state.open_positions.length} | closed=${state.closed_positions.length}`);
+
+  if (state.last_auto_closed?.length) {
+    console.log("AUTO-CLOSED THIS CYCLE");
+    for (const position of state.last_auto_closed) {
+      console.log(`- ${position.id} | ${position.pool_name} | pnl=${position.realized_pnl_pct}% (${position.realized_pnl_sol} SOL) | reason=${position.close_reason}`);
+    }
+  }
+
   for (const position of state.open_positions) {
     console.log(`- ${position.id} | ${position.pool_name} | ${position.amount_sol} SOL | score=${position.entry_score} | ${position.entry_decision}`);
     if (position.last_check) {
       const check = position.last_check;
-      console.log(`  held=${check.held_minutes}m | vol/activeTVL=${check.volume_active_tvl_ratio}x | fee/TVL=${check.fee_active_tvl_ratio}% | price_change=${check.price_change_from_entry_pct}%`);
+      console.log(`  held=${check.held_minutes}m | vol/activeTVL=${check.volume_active_tvl_ratio}x | fee/TVL=${check.fee_active_tvl_ratio}% | price_change=${check.price_change_from_entry_pct}% | fee_proxy=${check.fee_proxy_sol} SOL`);
       console.log(`  exit_signals=${check.exit_signals?.length ? check.exit_signals.join("; ") : "none"}`);
     }
   }
@@ -53,6 +75,8 @@ async function paperCycle({
   forceBest,
   reset,
   timeframe,
+  autoExit,
+  exitRules,
 } = {}) {
   if (reset) {
     const state = resetPaperState(balance);
@@ -63,7 +87,10 @@ async function paperCycle({
 
   if (state.open_positions.length > 0) {
     console.log("Refreshing open paper positions...");
-    state = await refreshPaperState({ timeframe });
+    state = await refreshPaperState({ timeframe, autoClose: autoExit, exitRules });
+    if (state.last_auto_closed?.length) {
+      console.log(`Auto-closed ${state.last_auto_closed.length} paper position(s).`);
+    }
   }
 
   console.log("Scanning candidates...");
@@ -117,12 +144,15 @@ async function main() {
   const reset = hasFlag("reset");
   const loop = hasFlag("loop");
   const forceBest = hasFlag("force-best");
+  const autoExit = !hasFlag("no-auto-exit");
+  const exitRules = buildExitRules();
 
   console.log("=== Streamlined Paper Agent ===");
-  console.log(`balance=${balance} SOL entry=${entry} SOL max_open=${maxOpen} limit=${limit} timeframe=${timeframe} force_best=${forceBest} loop=${loop}\n`);
+  console.log(`balance=${balance} SOL entry=${entry} SOL max_open=${maxOpen} limit=${limit} timeframe=${timeframe} force_best=${forceBest} loop=${loop} auto_exit=${autoExit}`);
+  console.log(`exit_rules=${JSON.stringify(exitRules)}\n`);
 
   if (!loop) {
-    await paperCycle({ balance, entry, limit, maxOpen, forceBest, reset, timeframe });
+    await paperCycle({ balance, entry, limit, maxOpen, forceBest, reset, timeframe, autoExit, exitRules });
     return;
   }
 
@@ -137,6 +167,8 @@ async function main() {
       forceBest,
       reset: first && reset,
       timeframe,
+      autoExit,
+      exitRules,
     });
     first = false;
     console.log(`Sleeping ${intervalSec}s. Press Ctrl+C to stop.`);
