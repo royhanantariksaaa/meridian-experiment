@@ -31,6 +31,10 @@ function booleanPenalty(flag, penalty) {
   return flag === true ? penalty : 0;
 }
 
+function shortId(value) {
+  return value ? String(value).slice(0, 8) : "????????";
+}
+
 function getTvl(pool) {
   return numeric(pool.active_tvl ?? pool.tvl, 0);
 }
@@ -186,6 +190,7 @@ export function scoreDeterministicCandidate(pool, options = {}) {
     pool: pool.pool,
     name: pool.name,
     base_symbol: pool.base?.symbol,
+    base_mint: pool.base?.mint,
     score,
     decision,
     reason,
@@ -219,8 +224,10 @@ export function formatDeterministicCandidateLine(entry, index = 0) {
   const d = entry.deterministic ?? entry;
   const p = entry.pool ?? {};
   const name = d.name || p.name || "unknown";
+  const poolAddress = d.pool || p.pool || null;
+  const baseMint = d.base_mint || p.base?.mint || null;
   const ratio = d.metrics?.volume_active_tvl_ratio ?? 0;
   const fee = d.metrics?.fee_active_tvl_ratio ?? 0;
   const bins = d.bins_below ?? "?";
-  return `${String(index + 1).padStart(2, " ")}. ${name} | score=${d.score} | ${d.decision} | fee/TVL=${fee}% | vol/activeTVL=${ratio}x | bins_below=${bins} | ${d.reason}`;
+  return `${String(index + 1).padStart(2, " ")}. ${name} [pool=${shortId(poolAddress)} mint=${shortId(baseMint)}] | score=${d.score} | ${d.decision} | fee/TVL=${fee}% | vol/activeTVL=${ratio}x | bins_below=${bins} | ${d.reason}`;
 }
