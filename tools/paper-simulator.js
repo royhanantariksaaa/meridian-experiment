@@ -11,6 +11,16 @@ const STATE_FILE = path.join(PAPER_DIR, "state.json");
 const DEFAULT_BALANCE_SOL = 0.1;
 const DEFAULT_ENTRY_SOL = 0.01;
 
+export const DEFAULT_PAPER_EXIT_RULES = Object.freeze({
+  minHoldBeforeWeakExitMinutes: 10,
+  forcedMaxHoldMinutes: 15,
+  maxHoldMinutes: 60,
+  minVolumeActiveTvlRatio: 1,
+  minFeeActiveTvlRatio: 0.05,
+  stopLossPct: -7,
+  takeProfitFeeProxyPct: 2,
+});
+
 function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
 }
@@ -36,6 +46,15 @@ function round(value, decimals = 6) {
 
 function shortId(value) {
   return String(value || "unknown").slice(0, 8);
+}
+
+function mergeExitRules(exitRules = {}) {
+  return {
+    ...DEFAULT_PAPER_EXIT_RULES,
+    ...Object.fromEntries(
+      Object.entries(exitRules).filter(([, value]) => value != null && value !== ""),
+    ),
+  };
 }
 
 function blankState(balanceSol = DEFAULT_BALANCE_SOL) {
@@ -92,6 +111,38 @@ function getPoolVolumeActiveTvlRatio(pool) {
   const volume = numeric(pool?.volume_window ?? pool?.volume, 0);
   if (activeTvl <= 0) return 0;
   return volume / activeTvl;
+}
+
+function getFeeProxyPct(position) {
+  const feeProxySol = maybeNumeric(position?.last_check?.fee_proxy_sol);
+  const amount = numeric(position?.amount_sol, 0);
+  if (feeProxySol == null || amount <= 0) return 0;
+  return (feeProxySol / amount) * 100;
+}
+
+function estimatePaperPnlPct(position) {
+  const feeProxyPct = getFeeProxyPct(position);
+  const priceChange = maybeNumeric(position?.last_check?.price_change_from_entry_pct) ?? 0;
+
+  // This is intentionally conservative and only for virtual paper testing.
+  // DLMM PnL depends on exact bins, inventory conversion, fees, and range crossing.
+  const downsideInventoryProxy = Math.min(0, priceChange) * 0.35;
+  return round(feeProxyPct + downsideInventoryProxy, 4);
+}
+
+function makeClosedPosition(position, { reason, pnlPct, auto = false } = {}) {
+  const pct = maybeNumeric(pnlPct) ?? 0;
+  const pnlSol = position.amount_sol * (pct / 100);
+  return {
+    ...position,
+    status: "CLOSED",
+    auto_closed: auto,
+    closed_at: nowIso(),
+    close_reason: reason,
+    realized_pnl_pct: round(pct, 4),
+    realized_pnl_sol: round(pnlSol, 9),
+    returned_sol: round(position.amount_sol + pnlSol, 9),
+  };
 }
 
 export async function scanPaperCandidates({ limit = 10 } = {}) {
@@ -204,6 +255,70 @@ function buildExitSignals({ position, metrics }) {
   return signals;
 }
 
+export function getPaperAutoExit(position, exitRules = {}) {
+  const rules = mergeExitRules(exitRules);
+  const check = position?.last_check;
+  if (!check || check.error) return null;
+
+  const held = numeric(check.held_minutes, 0);
+  const volumeRatio = numeric(check.volume_active_tvl_ratio, 0);
+  const feeActiveTvl = maybeNumeric(check.fee_active_tvl_ratio);
+  const priceChange = maybeNumeric(check.price_change_from_entry_pct);
+  const feeProxyPct = getFeeProxyPct(position);
+  const estimatedPnlPct = estimatePaperPnlPct(position);
+
+  if (priceChange != null && priceChange <= rules.stopLossPct) {
+    return {
+      reason: `paper stop loss: price change ${priceChange}% <= ${rules.stopLossPct}%`,
+      pnlPct: estimatedPnlPct,
+    };
+  }
+
+  if (priceChange != null && position.downside_coverage_pct != null && priceChange <= -Number(position.downside_coverage_pct)) {
+    return {
+      reason: `paper downside coverage breached: price change ${priceChange}% <= -${position.downside_coverage_pct}%`,
+      pnlPct: estimatedPnlPct,
+    };
+  }
+
+  if (feeProxyPct >= rules.takeProfitFeeProxyPct && volumeRatio >= rules.minVolumeActiveTvlRatio) {
+    return {
+      reason: `paper take profit proxy: fee proxy ${round(feeProxyPct, 4)}% >= ${rules.takeProfitFeeProxyPct}%`,
+      pnlPct: feeProxyPct,
+    };
+  }
+
+  if (position.forced && held >= rules.forcedMaxHoldMinutes && volumeRatio < rules.minVolumeActiveTvlRatio) {
+    return {
+      reason: `paper forced-entry exit: held ${held}m and volume/activeTVL ${volumeRatio}x < ${rules.minVolumeActiveTvlRatio}x`,
+      pnlPct: estimatedPnlPct,
+    };
+  }
+
+  if (held >= rules.minHoldBeforeWeakExitMinutes && volumeRatio < rules.minVolumeActiveTvlRatio) {
+    return {
+      reason: `paper weak-volume exit: held ${held}m and volume/activeTVL ${volumeRatio}x < ${rules.minVolumeActiveTvlRatio}x`,
+      pnlPct: estimatedPnlPct,
+    };
+  }
+
+  if (held >= rules.minHoldBeforeWeakExitMinutes && feeActiveTvl != null && feeActiveTvl < rules.minFeeActiveTvlRatio) {
+    return {
+      reason: `paper weak-fee exit: held ${held}m and fee/activeTVL ${feeActiveTvl}% < ${rules.minFeeActiveTvlRatio}%`,
+      pnlPct: estimatedPnlPct,
+    };
+  }
+
+  if (held >= rules.maxHoldMinutes) {
+    return {
+      reason: `paper max-hold exit: held ${held}m >= ${rules.maxHoldMinutes}m`,
+      pnlPct: estimatedPnlPct,
+    };
+  }
+
+  return null;
+}
+
 export async function refreshPaperPosition(position, { timeframe = "5m" } = {}) {
   const detail = await getPoolDetail({ pool_address: position.pool, timeframe });
   const currentPrice = getPoolPrice(detail);
@@ -241,14 +356,17 @@ export async function refreshPaperPosition(position, { timeframe = "5m" } = {}) 
   };
 }
 
-export async function refreshPaperState({ timeframe = "5m" } = {}) {
+export async function refreshPaperState({ timeframe = "5m", autoClose = false, exitRules = {} } = {}) {
   const state = loadPaperState();
   const refreshed = [];
+  const autoClosed = [];
+
   for (const position of state.open_positions) {
+    let nextPosition;
     try {
-      refreshed.push(await refreshPaperPosition(position, { timeframe }));
+      nextPosition = await refreshPaperPosition(position, { timeframe });
     } catch (error) {
-      refreshed.push({
+      nextPosition = {
         ...position,
         last_check: {
           checked_at: nowIso(),
@@ -256,11 +374,36 @@ export async function refreshPaperState({ timeframe = "5m" } = {}) {
           error: error.message,
           exit_signals: ["refresh failed"],
         },
+      };
+    }
+
+    const exit = autoClose ? getPaperAutoExit(nextPosition, exitRules) : null;
+    if (exit) {
+      const closed = makeClosedPosition(nextPosition, {
+        reason: exit.reason,
+        pnlPct: exit.pnlPct,
+        auto: true,
       });
+      state.closed_positions.push(closed);
+      state.balance_sol = round(state.balance_sol + closed.returned_sol, 9);
+      state.events.push({
+        ts: nowIso(),
+        type: "AUTO_CLOSE",
+        id: closed.id,
+        reason: closed.close_reason,
+        realized_pnl_pct: closed.realized_pnl_pct,
+        realized_pnl_sol: closed.realized_pnl_sol,
+        balance_sol: state.balance_sol,
+      });
+      autoClosed.push(closed);
+    } else {
+      refreshed.push(nextPosition);
     }
   }
+
   state.open_positions = refreshed;
-  state.events.push({ ts: nowIso(), type: "REFRESH", timeframe, count: refreshed.length });
+  state.last_auto_closed = autoClosed;
+  state.events.push({ ts: nowIso(), type: "REFRESH", timeframe, count: refreshed.length, auto_closed: autoClosed.length });
   saveState(state);
   return state;
 }
