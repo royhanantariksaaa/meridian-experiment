@@ -15,6 +15,8 @@ function argValue(name, fallback) {
 
 const HOST = argValue("host", "127.0.0.1");
 const PORT = Number(argValue("port", "8787"));
+const SSE_INTERVAL_MS = Number(argValue("sse-interval", "2000"));
+let sseSeq = 0;
 
 function sendJson(res, payload, status = 200) {
   res.writeHead(status, {
@@ -40,6 +42,13 @@ function fileMtime(file) {
   } catch {
     return null;
   }
+}
+
+function ageMs(iso) {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return null;
+  return Math.max(0, Date.now() - t);
 }
 
 function getFilesByMtime(dir, predicate = () => true) {
@@ -98,8 +107,20 @@ function getPaperState() {
   });
 }
 
+function getRuntime() {
+  const file = path.join(LOG_DIR, "paper-sim", "runtime.json");
+  const runtime = safeReadJson(file, { missing: true });
+  const heartbeat = runtime?.heartbeat_at || runtime?.updated_at || null;
+  return {
+    ...runtime,
+    heartbeat_age_ms: ageMs(heartbeat),
+    state_age_ms: ageMs(getPaperState()?.last_updated),
+  };
+}
+
 function getSummary() {
   const state = getPaperState();
+  const runtime = getRuntime();
   const openPositions = Array.isArray(state?.open_positions) ? state.open_positions : [];
   const closedPositions = Array.isArray(state?.closed_positions) ? state.closed_positions : [];
   const events = Array.isArray(state?.events) ? state.events : [];
@@ -113,7 +134,10 @@ function getSummary() {
       root_dir: ROOT_DIR,
       log_dir: LOG_DIR,
       read_only: true,
+      sse_seq: sseSeq,
+      sse_interval_ms: SSE_INTERVAL_MS,
     },
+    runtime,
     paper: {
       state,
       summary: {
@@ -136,6 +160,31 @@ function getSummary() {
   };
 }
 
+function sendSse(res, event, payload) {
+  res.write(`id: ${++sseSeq}\n`);
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function openSse(req, res) {
+  res.writeHead(200, {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-store, no-transform",
+    "connection": "keep-alive",
+    "access-control-allow-origin": "*",
+    "x-accel-buffering": "no",
+  });
+  res.write(": connected\n\n");
+  sendSse(res, "summary", getSummary());
+  const timer = setInterval(() => {
+    sendSse(res, "summary", getSummary());
+  }, SSE_INTERVAL_MS);
+
+  req.on("close", () => {
+    clearInterval(timer);
+  });
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${HOST}:${PORT}`);
 
@@ -154,6 +203,11 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (url.pathname === "/api/events") {
+    openSse(req, res);
+    return;
+  }
+
   if (url.pathname === "/api/summary") {
     sendJson(res, getSummary());
     return;
@@ -169,5 +223,6 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`Paper dashboard API listening on http://${HOST}:${PORT}`);
+  console.log(`SSE stream available at http://${HOST}:${PORT}/api/events`);
   console.log("Read-only mode. No trading actions are exposed.");
 });
