@@ -4,34 +4,47 @@ This fork includes a first-pass deterministic scoring layer for DLMM pool candid
 
 It does **not** replace the live Meridian screening/deploy loop yet. It is intentionally conservative: use it to inspect, score, and snapshot candidates before wiring anything into live execution.
 
+Current architecture:
+
+```text
+upstream getTopCandidates()
+→ upstream safety/enrichment/PVP/OKX/indicator filters
+→ deterministic observer score
+→ JSONL snapshots for later tuning
+```
+
 ## Files Added
 
 ```text
 docs/strategy.md
 tools/deterministic-scoring.js
+tools/screening-observer.js
+scripts/observe-screening.js
 test/test-deterministic-screening.js
 ```
 
 ## Run It
 
-Because `package.json` was not modified, run the test directly:
+Preferred observer command:
 
 ```bash
-node test/test-deterministic-screening.js --snapshot
+npm run screen:observe -- --limit=10
 ```
 
-Optional parameters:
+Useful variants:
 
 ```bash
-node test/test-deterministic-screening.js --page-size=50 --limit=15 --snapshot
+npm run screen:observe -- --limit=15 --json
+npm run screen:observe -- --limit=15 --no-snapshot
 ```
 
-The script will:
+The observer script will:
 
-1. Call the existing `discoverPools()` screener.
-2. Apply the deterministic score engine.
-3. Print score breakdowns.
-4. Assign one of three decisions:
+1. Call upstream `getTopCandidates()`.
+2. Preserve upstream screening, enrichment, PVP, OKX, ATH, indicator, blacklist, and cooldown behavior.
+3. Apply the deterministic score engine to the already-enriched candidates.
+4. Print score breakdowns.
+5. Assign one of three decisions:
 
 ```text
 AUTO_SKIP
@@ -39,15 +52,25 @@ ASK_LLM
 AUTO_DEPLOY_CANDIDATE
 ```
 
-5. Save a JSONL snapshot if `--snapshot` is provided.
+6. Save a JSONL snapshot by default.
 
 Snapshots are written to:
 
 ```text
-logs/screening-snapshots/YYYY-MM-DD.jsonl
+logs/screening-observer/YYYY-MM-DD.jsonl
 ```
 
 The `logs/` directory is already ignored by `.gitignore`, so local snapshots will not be committed.
+
+## Legacy Direct Test
+
+The older direct test still exists:
+
+```bash
+node test/test-deterministic-screening.js --snapshot
+```
+
+That test is useful for scoring `discoverPools()` output directly, but the preferred workflow is now `npm run screen:observe` because it layers on top of upstream `getTopCandidates()` instead of bypassing upstream enrichment.
 
 ## Decision Bands
 
@@ -75,6 +98,7 @@ organic_score
 holders
 volatility fit
 trend
+smart-wallet signal
 safety baseline
 ```
 
@@ -97,17 +121,25 @@ Hard flags:
 
 ```text
 wash trading flagged
-rugpull flagged
+rugpull flagged with no smart-wallet override
 unusable volatility
 bot holders over configured max
-top-10 holders over configured max
 token fees below configured minimum
 blocked launchpad
 ```
 
+Notes:
+
+```text
+top10 concentration = penalty, not hard skip
+rugpull = default skip unless smart-wallet override exists
+wash trading = hard skip
+low token fees = hard skip
+```
+
 ## Next Step
 
-Use this script for dry-run observation first. After enough snapshots, compare:
+Use `npm run screen:observe` for dry-run observation first. After enough snapshots, compare:
 
 ```text
 deterministic score
