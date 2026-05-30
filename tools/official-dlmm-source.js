@@ -4,15 +4,20 @@ import { config } from "../config.js";
 import { log } from "../logger.js";
 import { isBlacklisted } from "../token-blacklist.js";
 import { getBlockedDevs, isDevBlocked } from "../dev-blocklist.js";
+import { checkSmartWalletsOnPool } from "../smart-wallets.js";
+import { getTokenInfo, getTokenNarrative } from "./token.js";
 
 const OFFICIAL_DLMM_BASE = "https://dlmm.datapi.meteora.ag";
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
 const CACHE_DIR = path.join(process.cwd(), "logs", "market-cache");
 const DEFAULT_CACHE_TTL_MS = 60_000;
+const DEFAULT_RECON_CACHE_TTL_MS = 5 * 60_000;
 const DEFAULT_PAGE_SIZE = 1000;
 const DEFAULT_PAGES = 1;
 const DEFAULT_ENRICH_LIMIT = 30;
 const DEFAULT_ENRICH_DELAY_MS = 120;
+const DEFAULT_RECON_LIMIT = 10;
+const DEFAULT_RECON_DELAY_MS = 150;
 const WINDOW_FALLBACKS = ["5m", "30m", "1h", "2h", "4h", "12h", "24h"];
 
 function ensureDir(dir) {
@@ -85,7 +90,9 @@ function scorePool(pool) {
   const volActive = activeTvl > 0 ? volume / activeTvl : 0;
   const organic = numeric(pool.organic_score ?? pool.base?.organic, 0);
   const holders = numeric(pool.holders, 0);
-  return feeTvl * 1000 + volActive * 250 + organic * 10 + holders / 100;
+  const smartBoost = pool.smart_wallets_present || pool.smart_money_buy ? 250 : 0;
+  const narrativeBoost = pool.narrative_present ? 100 : 0;
+  return feeTvl * 1000 + volActive * 250 + organic * 10 + holders / 100 + smartBoost + narrativeBoost;
 }
 
 function getLaunchpad(pool) {
@@ -340,6 +347,101 @@ async function enrichShortlist(pools, { timeframe, enrichLimit, delayMs, ttlMs }
   return { enriched, errors };
 }
 
+function pickTokenInfoResult(info, mint) {
+  const results = Array.isArray(info?.results) ? info.results : [];
+  return results.find((entry) => entry?.mint === mint) || results[0] || null;
+}
+
+function mergeRecon(pool, recon) {
+  const token = pickTokenInfoResult(recon?.tokenInfo, pool.base?.mint);
+  const smartWallets = recon?.smartWallets || null;
+  const smartWalletCount = smartWallets?.in_pool?.length || 0;
+  const narrativeText = recon?.narrative?.narrative || null;
+  const audit = token?.audit || null;
+  const top10Pct = numeric(audit?.top_holders_pct);
+  const botHoldersPct = numeric(audit?.bot_holders_pct);
+
+  return {
+    ...pool,
+    sw: smartWallets,
+    smart_wallets_present: smartWalletCount > 0,
+    smart_wallet_count: smartWalletCount,
+    smart_wallets_count: smartWalletCount,
+    smart_wallet_buy: Boolean(token?.smart_money_buy) || smartWalletCount > 0,
+    smart_money_buy: Boolean(token?.smart_money_buy),
+    narrative_present: Boolean(narrativeText),
+    narrative_untrusted: narrativeText,
+    token_info: token,
+    audit,
+    top10_pct: top10Pct ?? pool.top10_pct,
+    bot_holders_pct: botHoldersPct ?? pool.bot_holders_pct,
+    global_fees_sol: token?.global_fees_sol ?? pool.global_fees_sol,
+    fees_sol: token?.global_fees_sol ?? pool.fees_sol,
+    bundle_pct: token?.bundle_pct ?? pool.bundle_pct,
+    sniper_pct: token?.sniper_pct ?? pool.sniper_pct,
+    suspicious_pct: token?.suspicious_pct ?? pool.suspicious_pct,
+    new_wallet_pct: token?.new_wallet_pct ?? pool.new_wallet_pct,
+    risk_level: token?.risk_level ?? pool.risk_level,
+    kol_in_clusters: token?.kol_in_clusters ?? pool.kol_in_clusters,
+    top_cluster_trend: token?.top_cluster_trend ?? pool.top_cluster_trend,
+    launchpad: token?.launchpad || pool.launchpad,
+    holders: token?.holders ?? pool.holders,
+    mcap: token?.mcap != null ? Math.round(Number(token.mcap)) : pool.mcap,
+    organic_score: token?.organic_score != null ? Math.round(Number(token.organic_score)) : pool.organic_score,
+    base: {
+      ...pool.base,
+      organic: token?.organic_score != null ? Math.round(Number(token.organic_score)) : pool.base?.organic,
+    },
+    stats_1h: token?.stats_1h ?? pool.stats_1h,
+  };
+}
+
+async function fetchPoolRecon(pool, { ttlMs }) {
+  const mint = pool.base?.mint;
+  const cacheKey = `official-recon-${pool.pool}-${mint || "no-mint"}`;
+  const cached = readCache(cacheKey, ttlMs);
+  if (cached) return { ...cached, cache_hit: true };
+
+  const [smartWallets, narrative, tokenInfo] = await Promise.allSettled([
+    checkSmartWalletsOnPool({ pool_address: pool.pool }),
+    mint ? getTokenNarrative({ mint }) : Promise.resolve(null),
+    mint ? getTokenInfo({ query: mint }) : Promise.resolve(null),
+  ]);
+
+  const payload = {
+    smartWallets: smartWallets.status === "fulfilled" ? smartWallets.value : null,
+    narrative: narrative.status === "fulfilled" ? narrative.value : null,
+    tokenInfo: tokenInfo.status === "fulfilled" ? tokenInfo.value : null,
+    errors: [
+      smartWallets.status === "rejected" ? `smart_wallets: ${smartWallets.reason?.message || smartWallets.reason}` : null,
+      narrative.status === "rejected" ? `narrative: ${narrative.reason?.message || narrative.reason}` : null,
+      tokenInfo.status === "rejected" ? `token_info: ${tokenInfo.reason?.message || tokenInfo.reason}` : null,
+    ].filter(Boolean),
+  };
+  writeCache(cacheKey, payload);
+  return { ...payload, cache_hit: false };
+}
+
+async function reconShortlist(pools, { reconLimit, delayMs, ttlMs }) {
+  const shortlisted = pools.slice(0, reconLimit);
+  const enriched = [];
+  const errors = [];
+  let cacheHits = 0;
+  for (const pool of shortlisted) {
+    try {
+      const recon = await fetchPoolRecon(pool, { ttlMs });
+      if (recon.cache_hit) cacheHits += 1;
+      if (recon.errors?.length) errors.push({ pool: pool.pool, name: pool.name, error: recon.errors.join("; ") });
+      enriched.push(mergeRecon(pool, recon));
+    } catch (error) {
+      errors.push({ pool: pool.pool, name: pool.name, error: error.message });
+      enriched.push(pool);
+    }
+    if (delayMs > 0) await sleep(delayMs);
+  }
+  return { enriched, errors, cacheHits };
+}
+
 export async function scanOfficialDlmmCandidates({
   limit = 10,
   timeframe = config.screening.timeframe || "1h",
@@ -347,8 +449,11 @@ export async function scanOfficialDlmmCandidates({
   pages = DEFAULT_PAGES,
   sortBy = null,
   cacheTtlMs = DEFAULT_CACHE_TTL_MS,
+  reconCacheTtlMs = DEFAULT_RECON_CACHE_TTL_MS,
   enrichLimit = DEFAULT_ENRICH_LIMIT,
   enrichDelayMs = DEFAULT_ENRICH_DELAY_MS,
+  reconLimit = DEFAULT_RECON_LIMIT,
+  reconDelayMs = DEFAULT_RECON_DELAY_MS,
 } = {}) {
   const metricWindow = getMetricWindow(timeframe);
   const safePageSize = Math.max(1, Math.min(1000, Number(pageSize) || DEFAULT_PAGE_SIZE));
@@ -375,7 +480,7 @@ export async function scanOfficialDlmmCandidates({
   }
 
   const rankedFirstPass = firstPass.sort((a, b) => scorePool(b) - scorePool(a));
-  const { enriched, errors } = await enrichShortlist(rankedFirstPass, {
+  const { enriched, errors: detailErrors } = await enrichShortlist(rankedFirstPass, {
     timeframe,
     enrichLimit: Math.max(limit, enrichLimit),
     delayMs: enrichDelayMs,
@@ -390,7 +495,16 @@ export async function scanOfficialDlmmCandidates({
     else finalCandidates.push(pool);
   }
 
-  const candidates = finalCandidates
+  const reconTarget = finalCandidates
+    .sort((a, b) => scorePool(b) - scorePool(a))
+    .slice(0, Math.max(limit, reconLimit));
+  const { enriched: reconned, errors: reconErrors, cacheHits: reconCacheHits } = await reconShortlist(reconTarget, {
+    reconLimit: Math.max(limit, reconLimit),
+    delayMs: reconDelayMs,
+    ttlMs: reconCacheTtlMs,
+  });
+
+  const candidates = reconned
     .sort((a, b) => scorePool(b) - scorePool(a))
     .slice(0, limit);
 
@@ -408,14 +522,19 @@ export async function scanOfficialDlmmCandidates({
         first_pass_count: firstPass.length,
         enriched_count: enriched.length,
         final_count: finalCandidates.length,
+        recon_count: reconned.length,
         returned_count: candidates.length,
         timeframe: metricWindow,
         sort_by: effectiveSortBy,
         cache_hits: pagesData.filter((page) => page.cache_hit).length,
+        recon_cache_hits: reconCacheHits,
+        smart_wallet_hits: candidates.filter((pool) => pool.smart_wallets_present).length,
+        narrative_hits: candidates.filter((pool) => pool.narrative_present).length,
+        smart_money_hits: candidates.filter((pool) => pool.smart_money_buy).length,
         first_pass_reject_reasons: collectRejectedSummary(firstPassRejected),
         final_reject_reasons: collectRejectedSummary(finalRejected),
       },
     ],
-    scan_errors: errors,
+    scan_errors: [...detailErrors, ...reconErrors],
   };
 }
