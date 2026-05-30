@@ -1,4 +1,5 @@
 import { discoverPools, getTopCandidates } from "./screening.js";
+import { scanOfficialFastCandidates } from "./official-dlmm-fast-source.js";
 import { scanOfficialDlmmCandidates } from "./official-dlmm-source.js";
 
 const DEFAULT_MULTISCAN_TIMEFRAMES = ["5m", "30m", "1h", "2h", "4h"];
@@ -43,6 +44,10 @@ export async function scanNormalCandidates({ limit = 10 } = {}) {
 }
 
 export async function scanOfficialCandidates({ limit = 10 } = {}) {
+  return scanOfficialFastCandidates({ limit });
+}
+
+export async function scanOfficialReconCandidates({ limit = 10 } = {}) {
   return scanOfficialDlmmCandidates({ limit });
 }
 
@@ -85,15 +90,17 @@ export async function scanMultiscanCandidates({
 export async function scanCandidatePools({ source = "auto", limit = 10 } = {}) {
   if (source === "normal") return scanNormalCandidates({ limit });
   if (source === "official") return scanOfficialCandidates({ limit });
+  if (source === "official-fast") return scanOfficialCandidates({ limit });
+  if (source === "official-recon") return scanOfficialReconCandidates({ limit });
   if (source === "multiscan") return scanMultiscanCandidates({ limit });
 
   const official = await scanOfficialCandidates({ limit }).catch((error) => ({
-    source: "official",
+    source: "official-fast",
     candidates: [],
-    filtered_examples: [{ name: "official", reason: error.message }],
-    scan_summary: [{ source: "official", error: error.message }],
+    filtered_examples: [{ name: "official-fast", reason: error.message }],
+    scan_summary: [{ source: "official-fast", error: error.message }],
   }));
-  if ((official.candidates || []).length > 0) return { ...official, source: "auto:official" };
+  if ((official.candidates || []).length > 0) return { ...official, source: "auto:official-fast" };
 
   const normal = await scanNormalCandidates({ limit }).catch((error) => ({
     source: "normal",
