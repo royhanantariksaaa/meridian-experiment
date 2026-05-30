@@ -52,16 +52,33 @@ function writeRuntime(patch = {}) {
   return next;
 }
 
-function buildExitRules() {
-  return {
+function argNumber(name, fallback) {
+  return Number(argValue(name, fallback));
+}
+
+function buildExitRules({ forceBest = false } = {}) {
+  const forcedDefaults = forceBest
+    ? {
+        minHoldBeforeWeakExitMinutes: 5,
+        forcedMaxHoldMinutes: 15,
+        maxHoldMinutes: 15,
+        stopLossPct: -4,
+        takeProfitFeeProxyPct: 1.5,
+      }
+    : {};
+  const defaults = {
     ...DEFAULT_PAPER_EXIT_RULES,
-    minHoldBeforeWeakExitMinutes: Number(argValue("weak-exit-min", DEFAULT_PAPER_EXIT_RULES.minHoldBeforeWeakExitMinutes)),
-    forcedMaxHoldMinutes: Number(argValue("forced-max-hold", DEFAULT_PAPER_EXIT_RULES.forcedMaxHoldMinutes)),
-    maxHoldMinutes: Number(argValue("max-hold", DEFAULT_PAPER_EXIT_RULES.maxHoldMinutes)),
-    minVolumeActiveTvlRatio: Number(argValue("min-vol-ratio", DEFAULT_PAPER_EXIT_RULES.minVolumeActiveTvlRatio)),
-    minFeeActiveTvlRatio: Number(argValue("min-fee-tvl", DEFAULT_PAPER_EXIT_RULES.minFeeActiveTvlRatio)),
-    stopLossPct: Number(argValue("stop-loss", DEFAULT_PAPER_EXIT_RULES.stopLossPct)),
-    takeProfitFeeProxyPct: Number(argValue("take-profit", DEFAULT_PAPER_EXIT_RULES.takeProfitFeeProxyPct)),
+    ...forcedDefaults,
+  };
+  return {
+    ...defaults,
+    minHoldBeforeWeakExitMinutes: argNumber("weak-exit-min", defaults.minHoldBeforeWeakExitMinutes),
+    forcedMaxHoldMinutes: argNumber("forced-max-hold", defaults.forcedMaxHoldMinutes),
+    maxHoldMinutes: argNumber("max-hold", defaults.maxHoldMinutes),
+    minVolumeActiveTvlRatio: argNumber("min-vol-ratio", defaults.minVolumeActiveTvlRatio),
+    minFeeActiveTvlRatio: argNumber("min-fee-tvl", defaults.minFeeActiveTvlRatio),
+    stopLossPct: argNumber("stop-loss", defaults.stopLossPct),
+    takeProfitFeeProxyPct: argNumber("take-profit", defaults.takeProfitFeeProxyPct),
   };
 }
 
@@ -225,7 +242,7 @@ async function main() {
   const loop = hasFlag("loop");
   const forceBest = hasFlag("force-best");
   const autoExit = !hasFlag("no-auto-exit");
-  const exitRules = buildExitRules();
+  const exitRules = buildExitRules({ forceBest });
 
   writeRuntime({
     mode: "starting",
@@ -272,10 +289,7 @@ async function main() {
   }
 }
 
-main()
-  .then(() => process.exit(0))
-  .catch((error) => {
-    writeRuntime({ mode: "error", error: error.message });
-    console.error(error);
-    process.exit(1);
-  });
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
