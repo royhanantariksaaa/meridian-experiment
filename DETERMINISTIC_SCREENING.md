@@ -20,6 +20,7 @@ docs/strategy.md
 tools/deterministic-scoring.js
 tools/screening-observer.js
 scripts/observe-screening.js
+scripts/debug-screening-funnel.js
 test/test-deterministic-screening.js
 ```
 
@@ -61,6 +62,43 @@ logs/screening-observer/YYYY-MM-DD.jsonl
 ```
 
 The `logs/` directory is already ignored by `.gitignore`, so local snapshots will not be committed.
+
+## Screening Funnel Debugger
+
+Use this when the observer returns only a few pools and you want to know where the candidate universe collapsed.
+
+```bash
+node scripts/debug-screening-funnel.js --page-size=100
+```
+
+Useful variants:
+
+```bash
+node scripts/debug-screening-funnel.js --page-size=100 --category=top
+node scripts/debug-screening-funnel.js --page-size=100 --category=new
+node scripts/debug-screening-funnel.js --page-size=100 --timeframe=30m
+node scripts/debug-screening-funnel.js --page-size=100 --timeframe=1h --category=top
+node scripts/debug-screening-funnel.js --page-size=100 --json
+```
+
+The funnel debugger does **not** deploy. It fetches a raw DLMM sample from Meteora and reports how many pools are removed by each local stage:
+
+```text
+critical warnings / ownership
+market cap
+holders
+volume
+TVL
+bin step
+fee/active-TVL
+volatility
+organic score
+launchpad / token age
+blacklist / dev blocklist
+occupied / cooldown
+```
+
+It also compares the local funnel against upstream `discoverPools()` and `getTopCandidates()` output, so you can tell whether the final candidate count is caused by broad API filters, local thresholds, occupied/cooldown rules, or later upstream enrichment.
 
 ## Legacy Direct Test
 
@@ -139,7 +177,7 @@ low token fees = hard skip
 
 ## Next Step
 
-Use `npm run screen:observe` for dry-run observation first. After enough snapshots, compare:
+Use `npm run screen:observe` and `node scripts/debug-screening-funnel.js` for dry-run observation first. After enough snapshots, compare:
 
 ```text
 deterministic score
