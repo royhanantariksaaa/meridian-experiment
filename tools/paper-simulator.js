@@ -20,6 +20,9 @@ export const DEFAULT_PAPER_EXIT_RULES = Object.freeze({
   minFeeActiveTvlRatio: 0.05,
   stopLossPct: -7,
   takeProfitFeeProxyPct: 2,
+  paperEntryCostPct: 0.05,
+  paperExitCostPct: 0.05,
+  paperSlippagePct: 0.1,
 });
 
 function ensureDir(dir) {
@@ -125,11 +128,16 @@ function getFeeProxyPct(position) {
   return (feeProxySol / amount) * 100;
 }
 
+function getExecutionCostPctFromCheck(check) {
+  return numeric(check?.execution_cost_pct, 0);
+}
+
 function estimatePaperPnlPct(position) {
   const feeProxyPct = getFeeProxyPct(position);
   const priceChange = maybeNumeric(position?.last_check?.price_change_from_entry_pct) ?? 0;
   const downsideInventoryProxy = Math.min(0, priceChange) * 0.35;
-  return round(feeProxyPct + downsideInventoryProxy, 4);
+  const executionCostPct = getExecutionCostPctFromCheck(position?.last_check);
+  return round(feeProxyPct + downsideInventoryProxy - executionCostPct, 4);
 }
 
 function estimateFeeProxyFromDelta({ position, currentFeeActiveTvlRatio }) {
@@ -164,15 +172,31 @@ function estimateFeeProxyFromDelta({ position, currentFeeActiveTvlRatio }) {
   };
 }
 
-function estimatePaperPnlFromMetrics({ amountSol, feeProxySol, priceChangePct }) {
+function estimateExecutionCostPct(rules = {}) {
+  const entry = Math.max(0, numeric(rules.paperEntryCostPct, 0));
+  const exit = Math.max(0, numeric(rules.paperExitCostPct, 0));
+  const slippage = Math.max(0, numeric(rules.paperSlippagePct, 0));
+  return {
+    model: "round_trip_friction_v1",
+    paper_entry_cost_pct: round(entry, 6),
+    paper_exit_cost_pct: round(exit, 6),
+    paper_slippage_pct: round(slippage, 6),
+    execution_cost_pct: round(entry + exit + slippage, 6),
+  };
+}
+
+function estimatePaperPnlFromMetrics({ amountSol, feeProxySol, priceChangePct, executionCostPct = 0 }) {
   const amount = numeric(amountSol, 0);
   const feePct = amount > 0 ? (numeric(feeProxySol, 0) / amount) * 100 : 0;
   const downsideInventoryProxy = Math.min(0, numeric(priceChangePct, 0)) * 0.35;
+  const executionCost = Math.max(0, numeric(executionCostPct, 0));
+  const netPct = feePct + downsideInventoryProxy - executionCost;
   return {
     fee_proxy_pct: round(feePct, 4),
     estimated_inventory_pnl_pct: round(downsideInventoryProxy, 4),
-    estimated_paper_pnl_pct: round(feePct + downsideInventoryProxy, 4),
-    estimated_paper_pnl_sol: round(amount * ((feePct + downsideInventoryProxy) / 100), 9),
+    execution_cost_pct: round(executionCost, 4),
+    estimated_paper_pnl_pct: round(netPct, 4),
+    estimated_paper_pnl_sol: round(amount * (netPct / 100), 9),
   };
 }
 
@@ -304,6 +328,7 @@ function buildExitSignals({ position, metrics }) {
   if (metrics.price_change_from_entry_pct != null && metrics.price_change_from_entry_pct <= -Number(position.downside_coverage_pct ?? 999)) {
     signals.push("price may be below simulated downside coverage");
   }
+  if (metrics.execution_cost_pct > 0) signals.push(`paper friction ${metrics.execution_cost_pct}% included`);
   if (position.forced) signals.push("forced entry was originally rejected by scorer");
   return signals;
 }
@@ -327,7 +352,7 @@ export function getPaperAutoExit(position, exitRules = {}) {
     return { reason: `paper downside coverage breached: price change ${priceChange}% <= -${position.downside_coverage_pct}%`, pnlPct: estimatedPnlPct };
   }
   if (feeProxyPct >= rules.takeProfitFeeProxyPct && volumeRatio >= rules.minVolumeActiveTvlRatio) {
-    return { reason: `paper take profit proxy: fee proxy ${round(feeProxyPct, 4)}% >= ${rules.takeProfitFeeProxyPct}%`, pnlPct: feeProxyPct };
+    return { reason: `paper take profit proxy: fee proxy ${round(feeProxyPct, 4)}% >= ${rules.takeProfitFeeProxyPct}%`, pnlPct: estimatedPnlPct };
   }
   if (position.forced && held >= rules.forcedMaxHoldMinutes && volumeRatio < rules.minVolumeActiveTvlRatio) {
     return { reason: `paper forced-entry exit: held ${held}m and volume/activeTVL ${volumeRatio}x < ${rules.minVolumeActiveTvlRatio}x`, pnlPct: estimatedPnlPct };
@@ -344,8 +369,10 @@ export function getPaperAutoExit(position, exitRules = {}) {
   return null;
 }
 
-export async function refreshPaperPosition(position, { timeframe = "5m" } = {}) {
+export async function refreshPaperPosition(position, { timeframe = "5m", exitRules = {} } = {}) {
   const effectiveTimeframe = resolvePaperRefreshTimeframe(position, timeframe);
+  const rules = mergeExitRules(exitRules);
+  const executionCost = estimateExecutionCostPct(rules);
   const detail = await getPoolDetail({ pool_address: position.pool, timeframe: effectiveTimeframe });
   const currentPrice = getPoolPrice(detail);
   const volumeActiveTvlRatio = getPoolVolumeActiveTvlRatio(detail);
@@ -362,6 +389,7 @@ export async function refreshPaperPosition(position, { timeframe = "5m" } = {}) 
     amountSol: position.amount_sol,
     feeProxySol: feeProxy.fee_proxy_sol,
     priceChangePct: priceChangeFromEntryPct,
+    executionCostPct: executionCost.execution_cost_pct,
   });
 
   const metrics = {
@@ -377,6 +405,11 @@ export async function refreshPaperPosition(position, { timeframe = "5m" } = {}) 
     fee_active_tvl_ratio_delta: feeProxy.fee_active_tvl_delta_pct,
     fee_proxy_model: feeProxy.model,
     gross_fee_proxy_pct: feeProxy.gross_fee_proxy_pct,
+    execution_cost_model: executionCost.model,
+    paper_entry_cost_pct: executionCost.paper_entry_cost_pct,
+    paper_exit_cost_pct: executionCost.paper_exit_cost_pct,
+    paper_slippage_pct: executionCost.paper_slippage_pct,
+    execution_cost_pct: executionCost.execution_cost_pct,
     volume: maybeNumeric(detail?.volume),
     active_tvl: maybeNumeric(detail?.active_tvl ?? detail?.tvl),
     volume_active_tvl_ratio: round(volumeActiveTvlRatio, 4),
@@ -402,7 +435,7 @@ export async function refreshPaperState({ timeframe = "5m", autoClose = false, e
     let nextPosition;
     const effectiveTimeframe = resolvePaperRefreshTimeframe(position, timeframe);
     try {
-      nextPosition = await refreshPaperPosition(position, { timeframe });
+      nextPosition = await refreshPaperPosition(position, { timeframe, exitRules });
     } catch (error) {
       nextPosition = {
         ...position,
