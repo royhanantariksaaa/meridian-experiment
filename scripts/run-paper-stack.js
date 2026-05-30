@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import path from "node:path";
+import fs from "node:fs";
 
 function hasFlag(name) {
   return process.argv.includes(`--${name}`);
@@ -9,6 +11,10 @@ function argValue(name, fallback = null) {
   const found = process.argv.find((arg) => arg.startsWith(prefix));
   return found ? found.slice(prefix.length) : fallback;
 }
+
+const ROOT_DIR = process.cwd();
+const DASHBOARD_DIR = path.join(ROOT_DIR, "dashboard");
+const VITE_BIN = path.join(ROOT_DIR, "node_modules", "vite", "bin", "vite.js");
 
 const config = {
   balance: argValue("balance", "0.1"),
@@ -30,18 +36,15 @@ const config = {
 const children = [];
 let shuttingDown = false;
 
-function npmCommand() {
-  return process.platform === "win32" ? "npm.cmd" : "npm";
-}
-
 function nodeCommand() {
   return process.execPath;
 }
 
 function startProcess(name, command, args, options = {}) {
+  const cwd = options.cwd || ROOT_DIR;
   console.log(`[stack] starting ${name}: ${command} ${args.join(" ")}`);
   const child = spawn(command, args, {
-    cwd: process.cwd(),
+    cwd,
     shell: false,
     stdio: ["ignore", "pipe", "pipe"],
     env: {
@@ -62,6 +65,11 @@ function startProcess(name, command, args, options = {}) {
     for (const line of String(data).split(/\r?\n/).filter(Boolean)) {
       console.error(`[${name}] ${line}`);
     }
+  });
+
+  child.on("error", (error) => {
+    console.error(`[stack] ${name} failed to start: ${error.message}`);
+    shutdown(1);
   });
 
   child.on("exit", (code, signal) => {
@@ -98,6 +106,13 @@ function buildPaperArgs() {
   return args;
 }
 
+function buildDashboardArgs() {
+  if (!fs.existsSync(VITE_BIN)) {
+    throw new Error(`Vite not found at ${VITE_BIN}. Run npm install from the repo root first.`);
+  }
+  return [VITE_BIN, "--host", "127.0.0.1", "--port", "5173"];
+}
+
 function shutdown(code = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -123,11 +138,16 @@ process.on("SIGTERM", () => shutdown(0));
 
 console.log("=== Meridian Paper Stack ===");
 console.log("Starts: paper agent loop + read-only API + Solid dashboard");
-console.log(`Dashboard: http://127.0.0.1:5173`);
+console.log("Dashboard: http://127.0.0.1:5173");
 console.log(`API:       http://${config.apiHost}:${config.apiPort}`);
 console.log(`Paper:     balance=${config.balance} SOL entry=${config.entry} SOL interval=${config.interval}s forceBest=${config.forceBest}`);
 console.log("Press Ctrl+C to stop everything.\n");
 
-startProcess("paper", nodeCommand(), buildPaperArgs());
-startProcess("api", nodeCommand(), ["scripts/paper-dashboard-api.js", `--host=${config.apiHost}`, `--port=${config.apiPort}`]);
-startProcess("dashboard", npmCommand(), ["run", "dev", "--workspace", "dashboard"]);
+try {
+  startProcess("paper", nodeCommand(), buildPaperArgs());
+  startProcess("api", nodeCommand(), ["scripts/paper-dashboard-api.js", `--host=${config.apiHost}`, `--port=${config.apiPort}`]);
+  startProcess("dashboard", nodeCommand(), buildDashboardArgs(), { cwd: DASHBOARD_DIR });
+} catch (error) {
+  console.error(`[stack] ${error.message}`);
+  shutdown(1);
+}
