@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
-import { getTopCandidates, getPoolDetail } from "./screening.js";
+import { getPoolDetail } from "./screening.js";
+import { scanCandidatePools } from "./paper-candidate-sources.js";
 import {
   buildDeterministicObservations,
   summarizeDeterministicDecisions,
@@ -123,11 +124,20 @@ function getFeeProxyPct(position) {
 function estimatePaperPnlPct(position) {
   const feeProxyPct = getFeeProxyPct(position);
   const priceChange = maybeNumeric(position?.last_check?.price_change_from_entry_pct) ?? 0;
-
-  // This is intentionally conservative and only for virtual paper testing.
-  // DLMM PnL depends on exact bins, inventory conversion, fees, and range crossing.
   const downsideInventoryProxy = Math.min(0, priceChange) * 0.35;
   return round(feeProxyPct + downsideInventoryProxy, 4);
+}
+
+function estimatePaperPnlFromMetrics({ amountSol, feeProxySol, priceChangePct }) {
+  const amount = numeric(amountSol, 0);
+  const feePct = amount > 0 ? (numeric(feeProxySol, 0) / amount) * 100 : 0;
+  const downsideInventoryProxy = Math.min(0, numeric(priceChangePct, 0)) * 0.35;
+  return {
+    fee_proxy_pct: round(feePct, 4),
+    estimated_inventory_pnl_pct: round(downsideInventoryProxy, 4),
+    estimated_paper_pnl_pct: round(feePct + downsideInventoryProxy, 4),
+    estimated_paper_pnl_sol: round(amount * ((feePct + downsideInventoryProxy) / 100), 9),
+  };
 }
 
 function makeClosedPosition(position, { reason, pnlPct, auto = false } = {}) {
@@ -145,15 +155,18 @@ function makeClosedPosition(position, { reason, pnlPct, auto = false } = {}) {
   };
 }
 
-export async function scanPaperCandidates({ limit = 10 } = {}) {
-  const topCandidates = await getTopCandidates({ limit });
-  const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, limit);
+export async function scanPaperCandidates({ limit = 10, source = "auto" } = {}) {
+  const scan = await scanCandidatePools({ source, limit });
+  const candidates = (scan?.candidates || []).slice(0, limit);
   const observations = buildDeterministicObservations(candidates);
   return {
+    source: scan?.source || source,
     candidates,
     observations,
     summary: summarizeDeterministicDecisions(observations),
-    filtered_examples: topCandidates?.filtered_examples ?? [],
+    filtered_examples: scan?.filtered_examples ?? [],
+    scan_summary: scan?.scan_summary ?? [],
+    scan_errors: scan?.scan_errors ?? [],
   };
 }
 
@@ -213,6 +226,8 @@ export function openPaperPosition({
     pool_name: pool.name,
     base: pool.base,
     quote: pool.quote,
+    source_timeframe: pool.source_timeframe ?? null,
+    source_category: pool.source_category ?? null,
     amount_sol: amount,
     entry_price: price,
     entry_fee_active_tvl_ratio: deterministic.metrics?.fee_active_tvl_ratio ?? pool.fee_active_tvl_ratio ?? null,
@@ -268,54 +283,26 @@ export function getPaperAutoExit(position, exitRules = {}) {
   const estimatedPnlPct = estimatePaperPnlPct(position);
 
   if (priceChange != null && priceChange <= rules.stopLossPct) {
-    return {
-      reason: `paper stop loss: price change ${priceChange}% <= ${rules.stopLossPct}%`,
-      pnlPct: estimatedPnlPct,
-    };
+    return { reason: `paper stop loss: price change ${priceChange}% <= ${rules.stopLossPct}%`, pnlPct: estimatedPnlPct };
   }
-
   if (priceChange != null && position.downside_coverage_pct != null && priceChange <= -Number(position.downside_coverage_pct)) {
-    return {
-      reason: `paper downside coverage breached: price change ${priceChange}% <= -${position.downside_coverage_pct}%`,
-      pnlPct: estimatedPnlPct,
-    };
+    return { reason: `paper downside coverage breached: price change ${priceChange}% <= -${position.downside_coverage_pct}%`, pnlPct: estimatedPnlPct };
   }
-
   if (feeProxyPct >= rules.takeProfitFeeProxyPct && volumeRatio >= rules.minVolumeActiveTvlRatio) {
-    return {
-      reason: `paper take profit proxy: fee proxy ${round(feeProxyPct, 4)}% >= ${rules.takeProfitFeeProxyPct}%`,
-      pnlPct: feeProxyPct,
-    };
+    return { reason: `paper take profit proxy: fee proxy ${round(feeProxyPct, 4)}% >= ${rules.takeProfitFeeProxyPct}%`, pnlPct: feeProxyPct };
   }
-
   if (position.forced && held >= rules.forcedMaxHoldMinutes && volumeRatio < rules.minVolumeActiveTvlRatio) {
-    return {
-      reason: `paper forced-entry exit: held ${held}m and volume/activeTVL ${volumeRatio}x < ${rules.minVolumeActiveTvlRatio}x`,
-      pnlPct: estimatedPnlPct,
-    };
+    return { reason: `paper forced-entry exit: held ${held}m and volume/activeTVL ${volumeRatio}x < ${rules.minVolumeActiveTvlRatio}x`, pnlPct: estimatedPnlPct };
   }
-
   if (held >= rules.minHoldBeforeWeakExitMinutes && volumeRatio < rules.minVolumeActiveTvlRatio) {
-    return {
-      reason: `paper weak-volume exit: held ${held}m and volume/activeTVL ${volumeRatio}x < ${rules.minVolumeActiveTvlRatio}x`,
-      pnlPct: estimatedPnlPct,
-    };
+    return { reason: `paper weak-volume exit: held ${held}m and volume/activeTVL ${volumeRatio}x < ${rules.minVolumeActiveTvlRatio}x`, pnlPct: estimatedPnlPct };
   }
-
   if (held >= rules.minHoldBeforeWeakExitMinutes && feeActiveTvl != null && feeActiveTvl < rules.minFeeActiveTvlRatio) {
-    return {
-      reason: `paper weak-fee exit: held ${held}m and fee/activeTVL ${feeActiveTvl}% < ${rules.minFeeActiveTvlRatio}%`,
-      pnlPct: estimatedPnlPct,
-    };
+    return { reason: `paper weak-fee exit: held ${held}m and fee/activeTVL ${feeActiveTvl}% < ${rules.minFeeActiveTvlRatio}%`, pnlPct: estimatedPnlPct };
   }
-
   if (held >= rules.maxHoldMinutes) {
-    return {
-      reason: `paper max-hold exit: held ${held}m >= ${rules.maxHoldMinutes}m`,
-      pnlPct: estimatedPnlPct,
-    };
+    return { reason: `paper max-hold exit: held ${held}m >= ${rules.maxHoldMinutes}m`, pnlPct: estimatedPnlPct };
   }
-
   return null;
 }
 
@@ -328,11 +315,12 @@ export async function refreshPaperPosition(position, { timeframe = "5m" } = {}) 
     ? ((currentPrice - position.entry_price) / position.entry_price) * 100
     : null;
   const heldMinutes = Math.max(0, Math.floor((Date.now() - new Date(position.opened_at).getTime()) / 60_000));
-
-  // This is deliberately labelled a proxy. Real DLMM fees depend on exact bins, swaps, inventory, and range crossing.
-  const feeProxySol = feeActiveTvlRatio != null
-    ? position.amount_sol * (feeActiveTvlRatio / 100)
-    : null;
+  const feeProxySol = feeActiveTvlRatio != null ? position.amount_sol * (feeActiveTvlRatio / 100) : null;
+  const estimates = estimatePaperPnlFromMetrics({
+    amountSol: position.amount_sol,
+    feeProxySol,
+    priceChangePct: priceChangeFromEntryPct,
+  });
 
   const metrics = {
     checked_at: nowIso(),
@@ -345,6 +333,7 @@ export async function refreshPaperPosition(position, { timeframe = "5m" } = {}) 
     active_tvl: maybeNumeric(detail?.active_tvl ?? detail?.tvl),
     volume_active_tvl_ratio: round(volumeActiveTvlRatio, 4),
     fee_proxy_sol: round(feeProxySol, 9),
+    ...estimates,
   };
 
   return {
@@ -366,24 +355,12 @@ export async function refreshPaperState({ timeframe = "5m", autoClose = false, e
     try {
       nextPosition = await refreshPaperPosition(position, { timeframe });
     } catch (error) {
-      nextPosition = {
-        ...position,
-        last_check: {
-          checked_at: nowIso(),
-          timeframe,
-          error: error.message,
-          exit_signals: ["refresh failed"],
-        },
-      };
+      nextPosition = { ...position, last_check: { checked_at: nowIso(), timeframe, error: error.message, exit_signals: ["refresh failed"] } };
     }
 
     const exit = autoClose ? getPaperAutoExit(nextPosition, exitRules) : null;
     if (exit) {
-      const closed = makeClosedPosition(nextPosition, {
-        reason: exit.reason,
-        pnlPct: exit.pnlPct,
-        auto: true,
-      });
+      const closed = makeClosedPosition(nextPosition, { reason: exit.reason, pnlPct: exit.pnlPct, auto: true });
       state.closed_positions.push(closed);
       state.balance_sol = round(state.balance_sol + closed.returned_sol, 9);
       state.events.push({
@@ -418,25 +395,10 @@ export function closePaperPosition({ id, pnlSol = 0, pnlPct = null, reason = "ma
   if (pnl == null && pnlPct != null) pnl = position.amount_sol * (Number(pnlPct) / 100);
   if (pnl == null) pnl = 0;
 
-  const closed = {
-    ...position,
-    status: "CLOSED",
-    closed_at: nowIso(),
-    close_reason: reason,
-    realized_pnl_sol: round(pnl, 9),
-    returned_sol: round(position.amount_sol + pnl, 9),
-  };
-
+  const closed = { ...position, status: "CLOSED", closed_at: nowIso(), close_reason: reason, realized_pnl_sol: round(pnl, 9), returned_sol: round(position.amount_sol + pnl, 9) };
   state.closed_positions.push(closed);
   state.balance_sol = round(state.balance_sol + closed.returned_sol, 9);
-  state.events.push({
-    ts: nowIso(),
-    type: "CLOSE",
-    id,
-    reason,
-    realized_pnl_sol: closed.realized_pnl_sol,
-    balance_sol: state.balance_sol,
-  });
+  state.events.push({ ts: nowIso(), type: "CLOSE", id, reason, realized_pnl_sol: closed.realized_pnl_sol, balance_sol: state.balance_sol });
   saveState(state);
   return { state, closed };
 }
