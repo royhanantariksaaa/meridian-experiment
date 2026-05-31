@@ -79,6 +79,9 @@ function buildExitRules({ forceBest = false } = {}) {
     minFeeActiveTvlRatio: argNumber("min-fee-tvl", defaults.minFeeActiveTvlRatio),
     stopLossPct: argNumber("stop-loss", defaults.stopLossPct),
     takeProfitFeeProxyPct: argNumber("take-profit", defaults.takeProfitFeeProxyPct),
+    paperEntryCostPct: argNumber("paper-entry-cost", defaults.paperEntryCostPct),
+    paperExitCostPct: argNumber("paper-exit-cost", defaults.paperExitCostPct),
+    paperSlippagePct: argNumber("paper-slippage", defaults.paperSlippagePct),
   };
 }
 
@@ -96,7 +99,7 @@ function printStateCompact(state, { showAutoClosed = false } = {}) {
     console.log(`- ${position.id} | ${position.pool_name} | ${position.amount_sol} SOL | score=${position.entry_score} | ${position.entry_decision}`);
     if (position.last_check) {
       const check = position.last_check;
-      console.log(`  held=${check.held_minutes}m | vol/activeTVL=${check.volume_active_tvl_ratio}x | fee/TVL=${check.fee_active_tvl_ratio}% | price_change=${check.price_change_from_entry_pct}% | est_pnl=${check.estimated_paper_pnl_pct}% | fee_proxy=${check.fee_proxy_sol} SOL`);
+      console.log(`  held=${check.held_minutes}m | vol/activeTVL=${check.volume_active_tvl_ratio}x | fee/TVL=${check.fee_active_tvl_ratio}% | price_change=${check.price_change_from_entry_pct}% | est_pnl=${check.estimated_paper_pnl_pct}% | fee_proxy=${check.fee_proxy_sol} SOL | friction=${check.execution_cost_pct ?? 0}%`);
       console.log(`  exit_signals=${check.exit_signals?.length ? check.exit_signals.join("; ") : "none"}`);
     }
   }
@@ -127,7 +130,7 @@ async function refreshOpenPositions({ timeframe, autoExit, exitRules, label = "m
   for (const position of state.open_positions) {
     const check = position.last_check;
     if (!check) continue;
-    console.log(`[${label}] ${position.pool_name}: held=${check.held_minutes}m vol/activeTVL=${check.volume_active_tvl_ratio}x fee/TVL=${check.fee_active_tvl_ratio}% price=${check.price_change_from_entry_pct}% est_pnl=${check.estimated_paper_pnl_pct}% signals=${check.exit_signals?.length || 0}`);
+    console.log(`[${label}] ${position.pool_name}: held=${check.held_minutes}m vol/activeTVL=${check.volume_active_tvl_ratio}x fee/TVL=${check.fee_active_tvl_ratio}% price=${check.price_change_from_entry_pct}% est_pnl=${check.estimated_paper_pnl_pct}% friction=${check.execution_cost_pct ?? 0}% signals=${check.exit_signals?.length || 0}`);
   }
   if (autoClosedCount) {
     printStateCompact(state, { showAutoClosed: true });
